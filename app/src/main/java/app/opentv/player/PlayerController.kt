@@ -6,23 +6,31 @@
 package app.opentv.player
 
 import android.content.Context
+import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Metadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultLivePlaybackSpeedControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
+import androidx.media3.extractor.metadata.scte35.SpliceInsertCommand
+import androidx.media3.extractor.metadata.scte35.SpliceScheduleCommand
+import androidx.media3.extractor.metadata.scte35.TimeSignalCommand
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -31,6 +39,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
+import java.util.Locale
+
+private const val COMMERCIAL_PROBE_TAG = "OpenTVCommercialProbe"
+private const val LIVE_POLICY_TAG = "OpenTVLivePolicy"
 
 /**
  * Owns the single [ExoPlayer] instance and everything about switching what it is playing.
@@ -104,6 +116,8 @@ class PlayerController(
         /** Live streams are never resumed; VOD is. */
         val startPositionMillis: Long = 0L,
         val isLive: Boolean = true,
+        /** Stable database identity used only to remember this channel's learned live target. */
+        val channelId: Long? = null,
     )
 
     private val _state = MutableStateFlow<State>(State.Idle)
@@ -116,6 +130,22 @@ class PlayerController(
     private var switchJob: Job? = null
     private var current: Request? = null
     private var consecutiveFailures = 0
+    private var lastMetadataMimeTypes: Set<String> = emptySet()
+    private var currentLiveTargetMillis = AdaptiveLivePolicy.DEFAULT_TARGET_MILLIS
+    private var currentReachedReady = false
+
+    private val liveTargetPreferences = context.getSharedPreferences(
+        LIVE_TARGET_PREFERENCES,
+        Context.MODE_PRIVATE,
+    )
+
+    /**
+     * Media3 already moves its target after a rebuffer. Five seconds reacts quickly enough for
+     * IPTV segment-publication gaps; the stock 500 ms step needed many visible stalls to recover.
+     */
+    private val livePlaybackSpeedControl = DefaultLivePlaybackSpeedControl.Builder()
+        .setTargetLiveOffsetIncrementOnRebufferMs(AdaptiveLivePolicy.REBUFFER_STEP_MILLIS)
+        .build()
 
     /**
      * Held so the User-Agent can be swapped per source before each tune.
@@ -130,13 +160,13 @@ class PlayerController(
     }
 
     private val dataSourceFactory: androidx.media3.datasource.DataSource.Factory =
-        DefaultDataSource.Factory(context, httpFactory).let { default ->
+        CommercialProbeDataSourceFactory(DefaultDataSource.Factory(context, httpFactory).let { default ->
             val custom = buildMap<String, androidx.media3.datasource.DataSource.Factory> {
                 if (smbDataSourceFactory != null) put("smb", smbDataSourceFactory)
                 if (growingDataSourceFactory != null) put("optvrec", growingDataSourceFactory)
             }
             if (custom.isEmpty()) default else RoutingDataSourceFactory(default, custom)
-        }
+        })
 
     /**
      * Retry policy tuned for IPTV rather than for CDNs.
@@ -187,6 +217,7 @@ class PlayerController(
                 .setLoadErrorHandlingPolicy(loadErrorPolicy),
         )
         .setTrackSelector(trackSelector)
+        .setLivePlaybackSpeedControl(livePlaybackSpeedControl)
         .setLoadControl(
             DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
@@ -217,14 +248,80 @@ class PlayerController(
             addListener(object : Player.Listener {
                 override fun onTracksChanged(tracks: Tracks) {
                     _tracks.value = tracks
+                    val metadataMimeTypes = buildSet {
+                        tracks.groups
+                            .filter { it.type == C.TRACK_TYPE_METADATA }
+                            .forEach { group ->
+                                repeat(group.length) { index ->
+                                    group.getTrackFormat(index).sampleMimeType?.let(::add)
+                                }
+                            }
+                    }
+                    if (metadataMimeTypes != lastMetadataMimeTypes) {
+                        lastMetadataMimeTypes = metadataMimeTypes
+                        Log.i(
+                            COMMERCIAL_PROBE_TAG,
+                            if (metadataMimeTypes.isEmpty()) {
+                                "metadata_tracks=none preview=$preview"
+                            } else {
+                                "metadata_tracks=${metadataMimeTypes.sorted().joinToString(",")} preview=$preview"
+                            },
+                        )
+                    }
+                }
+
+                override fun onMetadata(metadata: Metadata) {
+                    repeat(metadata.length()) { index ->
+                        when (val entry = metadata[index]) {
+                            is SpliceInsertCommand -> Log.i(
+                                COMMERCIAL_PROBE_TAG,
+                                "scte35=splice_insert out_of_network=${entry.outOfNetworkIndicator} " +
+                                    "cancelled=${entry.spliceEventCancelIndicator} " +
+                                    "auto_return=${entry.autoReturn} duration_us=${entry.breakDurationUs}",
+                            )
+
+                            is TimeSignalCommand -> Log.i(
+                                COMMERCIAL_PROBE_TAG,
+                                "scte35=time_signal playback_position_us=${entry.playbackPositionUs}",
+                            )
+
+                            is SpliceScheduleCommand -> Log.i(
+                                COMMERCIAL_PROBE_TAG,
+                                "scte35=splice_schedule events=${entry.events.size}",
+                            )
+
+                            else -> Log.i(
+                                COMMERCIAL_PROBE_TAG,
+                                "timed_metadata=${entry.javaClass.simpleName}",
+                            )
+                        }
+                    }
                 }
 
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     val title = current?.title.orEmpty()
+                    if (
+                        playbackState == Player.STATE_BUFFERING &&
+                        currentReachedReady &&
+                        !preview &&
+                        current?.let(::usesAdaptiveHlsPolicy) == true
+                    ) {
+                        val learnedTarget = AdaptiveLivePolicy.targetAfterRebuffer(currentLiveTargetMillis)
+                        if (learnedTarget != currentLiveTargetMillis) {
+                            currentLiveTargetMillis = learnedTarget
+                            current?.channelId?.let { channelId ->
+                                liveTargetPreferences.edit()
+                                    .putLong(liveTargetKey(channelId), learnedTarget)
+                                    .apply()
+                            }
+                            Log.i(LIVE_POLICY_TAG, "event=rebuffer learned_target_ms=$learnedTarget")
+                        }
+                    }
                     _state.value = when (playbackState) {
                         Player.STATE_BUFFERING -> State.Buffering(title)
                         Player.STATE_READY -> {
                             consecutiveFailures = 0
+                            currentReachedReady = true
                             State.Playing(title)
                         }
                         Player.STATE_IDLE -> _state.value
@@ -269,17 +366,28 @@ class PlayerController(
             if (debounce) delay(switchDebounceMillis)
 
             consecutiveFailures = 0
+            currentReachedReady = false
             httpFactory.setDefaultRequestProperties(mapOf("User-Agent" to request.userAgent))
             _state.value = State.Buffering(request.title)
+
+            val adaptiveHls = usesAdaptiveHlsPolicy(request)
+            val savedLiveTarget = request.channelId?.takeIf { adaptiveHls }?.let { channelId ->
+                val key = liveTargetKey(channelId)
+                if (liveTargetPreferences.contains(key)) liveTargetPreferences.getLong(key, 0L) else null
+            }
+            currentLiveTargetMillis = AdaptiveLivePolicy.targetFor(savedLiveTarget)
+            if (adaptiveHls) {
+                val source = if (savedLiveTarget == null) "default" else "learned"
+                Log.i(LIVE_POLICY_TAG, "target_source=$source target_ms=$currentLiveTargetMillis")
+            }
 
             val mediaItem = MediaItem.Builder()
                 .setUri(request.url)
                 .apply {
-                    // Only meaningful for live streams; setting it on VOD skews seeking.
-                    if (request.isLive) {
+                    if (adaptiveHls) {
                         setLiveConfiguration(
                             MediaItem.LiveConfiguration.Builder()
-                                .setTargetOffsetMs(LIVE_TARGET_OFFSET_MILLIS)
+                                .setTargetOffsetMs(currentLiveTargetMillis)
                                 .build(),
                         )
                     }
@@ -385,6 +493,7 @@ class PlayerController(
         const val MAX_LOAD_RETRIES = 5
         const val MAX_AUTO_RESTARTS = 3
         const val AUTO_RESTART_DELAY_MILLIS = 1_500L
+        const val LIVE_TARGET_PREFERENCES = "adaptive_live_targets_v1"
 
         /**
          * Larger than ExoPlayer's defaults. IPTV sources are much twitchier than a CDN, and a
@@ -421,6 +530,80 @@ class PlayerController(
         const val PREVIEW_BUFFER_AFTER_REBUFFER_MILLIS = 1_500
         const val PREVIEW_SWITCH_DEBOUNCE_MILLIS = 700L
 
-        const val LIVE_TARGET_OFFSET_MILLIS = 10_000L
+    }
+
+    private fun liveTargetKey(channelId: Long): String = "channel_$channelId"
+
+    private fun usesAdaptiveHlsPolicy(request: Request): Boolean =
+        request.isLive && request.url.substringBefore('?').endsWith(".m3u8", ignoreCase = true)
+}
+
+/**
+ * Passively scans HLS playlist text for standard commercial-break cue tags. It deliberately logs
+ * only the cue token: never the playlist body, request URI, headers, or provider credentials.
+ */
+private class CommercialProbeDataSourceFactory(
+    private val upstream: DataSource.Factory,
+) : DataSource.Factory {
+    override fun createDataSource(): DataSource = CommercialProbeDataSource(upstream.createDataSource())
+}
+
+private class CommercialProbeDataSource(
+    private val upstream: DataSource,
+) : DataSource by upstream {
+    private var scanPlaylist = false
+    private var tail = ""
+
+    override fun open(dataSpec: DataSpec): Long {
+        val result = upstream.open(dataSpec)
+        val pathSuggestsPlaylist = dataSpec.uri.path.orEmpty().contains(".m3u8", ignoreCase = true)
+        val contentTypeSuggestsPlaylist = upstream.responseHeaders
+            .filterKeys { it.equals("Content-Type", ignoreCase = true) }
+            .values
+            .flatten()
+            .any { value ->
+                value.contains("mpegurl", ignoreCase = true) ||
+                    value.contains("vnd.apple.mpegurl", ignoreCase = true)
+            }
+        scanPlaylist = pathSuggestsPlaylist || contentTypeSuggestsPlaylist
+        if (scanPlaylist && COMMERCIAL_PLAYLIST_SCAN_ACTIVE.compareAndSet(false, true)) {
+            Log.i(COMMERCIAL_PROBE_TAG, "playlist_scan=active")
+        }
+        tail = ""
+        return result
+    }
+
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        val bytesRead = upstream.read(buffer, offset, length)
+        if (scanPlaylist && bytesRead > 0) {
+            val chunk = String(buffer, offset, bytesRead, Charsets.ISO_8859_1).uppercase(Locale.US)
+            val searchable = tail + chunk
+            COMMERCIAL_CUE_TOKENS.forEach { token ->
+                if (searchable.contains(token) && REPORTED_COMMERCIAL_CUE_TOKENS.add(token)) {
+                    Log.i(COMMERCIAL_PROBE_TAG, "playlist_cue=$token")
+                }
+            }
+            tail = searchable.takeLast(MAX_COMMERCIAL_CUE_TOKEN_LENGTH - 1)
+        }
+        return bytesRead
+    }
+
+    override fun close() {
+        scanPlaylist = false
+        tail = ""
+        upstream.close()
     }
 }
+
+private val COMMERCIAL_CUE_TOKENS = listOf(
+    "#EXT-X-CUE-OUT",
+    "#EXT-X-CUE-IN",
+    "#EXT-OATCLS-SCTE35",
+    "#EXT-X-SPLICEPOINT-SCTE35",
+    "SCTE35-OUT",
+    "SCTE35-IN",
+    "#EXT-X-DATERANGE",
+)
+private val REPORTED_COMMERCIAL_CUE_TOKENS = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+private val COMMERCIAL_PLAYLIST_SCAN_ACTIVE = java.util.concurrent.atomic.AtomicBoolean(false)
+private val MAX_COMMERCIAL_CUE_TOKEN_LENGTH = COMMERCIAL_CUE_TOKENS.maxOf(String::length)

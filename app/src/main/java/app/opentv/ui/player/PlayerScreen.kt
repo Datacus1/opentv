@@ -197,6 +197,10 @@ fun PlayerScreen(
         }
     }
     LaunchedEffect(paused) { app.opentv.core.PipState.isPlaying = !paused }
+    // A second media app cannot mute OpenTV through audio focus because PlayerController does
+    // not opt in to ExoPlayer's audio-focus handling. Keep the live stream advancing in PiP,
+    // but give the foreground app exclusive audible playback until OpenTV is expanded again.
+    LaunchedEffect(inPip) { controller.player.volume = if (inPip) 0f else 1f }
     val barFocus = remember { FocusRequester() }
     val panelFocus = remember { FocusRequester() }
     val rootFocus = remember { FocusRequester() }
@@ -225,6 +229,7 @@ fun PlayerScreen(
                     title = channel.shownName,
                     userAgent = source?.userAgent ?: "OpenTV/0.1 (Android)",
                     isLive = true,
+                    channelId = channel.id,
                 ),
                 debounce = false,
             )

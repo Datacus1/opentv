@@ -7,8 +7,10 @@ package app.opentv
 
 import android.app.PictureInPictureParams
 import android.app.UiModeManager
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Build
@@ -85,6 +87,22 @@ import app.opentv.update.UpdateGate
 
 class MainActivity : ComponentActivity() {
 
+    /**
+     * The Shield-local commercial-break monitor uses this protected broadcast to remove OpenTV's
+     * PiP after the viewer leaves SmartTube for Home, Plex, or another app. Requiring DUMP limits
+     * callers to the ADB shell/system instead of allowing an arbitrary installed app to close us.
+     */
+    private val closeCommercialBreakPipReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == ACTION_CLOSE_COMMERCIAL_BREAK_PIP &&
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.N &&
+                isInPictureInPictureMode
+            ) {
+                finishAndRemoveTask()
+            }
+        }
+    }
+
     // Apply the chosen UI language before any view or resource is resolved. A language change in
     // settings calls recreate(), which re-runs this with the new tag.
     override fun attachBaseContext(newBase: Context) {
@@ -93,6 +111,24 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val closePipFilter = IntentFilter(ACTION_CLOSE_COMMERCIAL_BREAK_PIP)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(
+                closeCommercialBreakPipReceiver,
+                closePipFilter,
+                android.Manifest.permission.DUMP,
+                null,
+                Context.RECEIVER_EXPORTED,
+            )
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(
+                closeCommercialBreakPipReceiver,
+                closePipFilter,
+                android.Manifest.permission.DUMP,
+                null,
+            )
+        }
         enableEdgeToEdge()
         handlePlayIntent(intent)
         val isTelevision = isRunningOnTelevision(this)
@@ -123,6 +159,11 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handlePlayIntent(intent)
+    }
+
+    override fun onDestroy() {
+        runCatching { unregisterReceiver(closeCommercialBreakPipReceiver) }
+        super.onDestroy()
     }
 
     private fun handlePlayIntent(intent: Intent?) {
@@ -179,6 +220,9 @@ class MainActivity : ComponentActivity() {
 
         /** A recording auto-switch notification carries the recording to watch in this extra. */
         const val EXTRA_WATCH_RECORDING = "opentv.watch_recording"
+
+        /** ADB-shell-only request from the Shield commercial-break monitor to close a stale PiP. */
+        const val ACTION_CLOSE_COMMERCIAL_BREAK_PIP = "app.opentv.action.CLOSE_COMMERCIAL_BREAK_PIP"
     }
 }
 
