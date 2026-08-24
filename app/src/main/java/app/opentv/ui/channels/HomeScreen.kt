@@ -282,6 +282,12 @@ fun HomeScreen(
         currentChannelId = currentChannelId,
         highlightedChannelId = highlightedChannel?.id,
     )
+    val previewVisible = previewEnabled && !recordingActive
+    val watchChannelId = GuidePreviewPolicy.watchChannelId(
+        previewVisible = previewVisible,
+        previewChannelId = previewChannelId,
+        highlightedChannelId = highlightedChannel?.id,
+    )
     LaunchedEffect(
         previewChannelId,
         previewEnabled,
@@ -442,10 +448,20 @@ fun HomeScreen(
                 GuidePreview(
                     row = highlightedRow,
                     nowMillis = nowMillis,
-                    onWatch = { highlightedRow?.let { goFullscreen(it.primary) } },
+                    onWatch = {
+                        watchChannelId?.let { id ->
+                            if (id == highlightedChannel?.id) {
+                                highlightedChannel?.let(::goFullscreen)
+                            } else {
+                                recordScope.launch {
+                                    graph.catalogRepository.channel(id)?.let(::goFullscreen)
+                                }
+                            }
+                        }
+                    },
                     onRefresh = onRefresh,
                     onAddSource = onAddSource,
-                    previewPlayer = if (previewEnabled && !recordingActive) previewController.player else null,
+                    previewPlayer = if (previewVisible) previewController.player else null,
                     isRecording = highlightedRow?.primary?.id?.let { id ->
                         activeRecordings.any { it.channelId == id }
                     } == true,

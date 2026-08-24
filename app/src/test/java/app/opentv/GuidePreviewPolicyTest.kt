@@ -58,4 +58,40 @@ class GuidePreviewPolicyTest {
             ),
         )
     }
+
+    @Test
+    fun watchOpensTheChannelShownInThePreview() {
+        assertEquals(
+            42L,
+            GuidePreviewPolicy.watchChannelId(
+                previewVisible = true,
+                previewChannelId = 42L,
+                highlightedChannelId = 99L,
+            ),
+        )
+    }
+
+    @Test
+    fun watchUsesHighlightWhenPreviewIsHidden() {
+        assertEquals(
+            99L,
+            GuidePreviewPolicy.watchChannelId(
+                previewVisible = false,
+                previewChannelId = 42L,
+                highlightedChannelId = 99L,
+            ),
+        )
+    }
+
+    @Test
+    fun watchFallsBackToHighlightWhilePreviewTargetIsUnavailable() {
+        assertEquals(
+            99L,
+            GuidePreviewPolicy.watchChannelId(
+                previewVisible = true,
+                previewChannelId = null,
+                highlightedChannelId = 99L,
+            ),
+        )
+    }
 }

@@ -18,4 +18,15 @@ internal object GuidePreviewPolicy {
             currentChannelId.takeIf { it > 0L } ?: highlightedChannelId
         AppSettings.GuidePreviewMode.HIGHLIGHTED_CHANNEL -> highlightedChannelId
     }
+
+    /** The Watch control belongs to the video card, so it must open the video actually shown. */
+    fun watchChannelId(
+        previewVisible: Boolean,
+        previewChannelId: Long?,
+        highlightedChannelId: Long?,
+    ): Long? = if (previewVisible) {
+        previewChannelId ?: highlightedChannelId
+    } else {
+        highlightedChannelId
+    }
 }
