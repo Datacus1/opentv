@@ -54,6 +54,11 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -366,7 +371,39 @@ fun HomeScreen(
         )
     }
 
-    Row(Modifier.fillMaxSize()) {
+    val guideBackEnabled = currentChannelId > 0L &&
+        channelMenu == null &&
+        recordTarget == null &&
+        pendingLiveChannel == null &&
+        !showBackgroundPrompt
+    fun returnToCurrentChannel() {
+        val visibleChannel = rows.asSequence()
+            .flatMap { sequenceOf(it.primary) + it.variants.asSequence() }
+            .firstOrNull { it.id == currentChannelId }
+        if (visibleChannel != null) {
+            requestLive(visibleChannel)
+        } else {
+            recordScope.launch {
+                graph.catalogRepository.channel(currentChannelId)?.let(::requestLive)
+            }
+        }
+    }
+
+    Row(
+        Modifier
+            .fillMaxSize()
+            // The app shell normally treats Back on Live TV as an exit request. Consume both
+            // event halves here and navigate on key-up so guide Back resumes the last watched
+            // channel without leaking into either MainScreen or the newly-opened PlayerScreen.
+            .onPreviewKeyEvent { event ->
+                if (guideBackEnabled && (event.key == Key.Back || event.key == Key.Escape)) {
+                    if (event.type == KeyEventType.KeyUp) returnToCurrentChannel()
+                    true
+                } else {
+                    false
+                }
+            },
+    ) {
 
         // ---- Category rail -----------------------------------------------------------------
         // Width animates to 0 while focus is in the guide (see onFocusRow) so the grid gets the
@@ -541,7 +578,8 @@ fun HomeScreen(
                         selectedKey = highlightedRow?.key,
                         focusRequestKey = guideFocusTargetKey,
                         focusRequestId = guideFocusRequestId,
-                        onSelectRow = { row -> channelMenu = row },
+                        onSelectRow = { row -> requestLive(row.primary) },
+                        onOpenRowOptions = { row -> channelMenu = row },
                         onFocusRow = onFocusChannel,
                         onToggleFavourite = { viewModel.toggleFavourite(it) },
                         onExitLeftFromChannel = onExitLeftChannel,
@@ -555,9 +593,10 @@ fun HomeScreen(
                         selectedKey = highlightedRow?.key,
                         focusRequestKey = guideFocusTargetKey,
                         focusRequestId = guideFocusRequestId,
-                        // OK on a channel opens its menu: Watch, Record now, Schedule a later show,
-                        // Record series. The preview already follows the highlight as you browse.
-                        onSelectRow = { row -> channelMenu = row },
+                        // A short OK watches immediately. Hold OK for Watch/external/record options.
+                        // Programme blocks keep their separate record/schedule action dialog.
+                        onSelectRow = { row -> requestLive(row.primary) },
+                        onOpenRowOptions = { row -> channelMenu = row },
                         onFocusRow = onFocusChannel,
                         onProgramme = { row, programme -> recordTarget = row to programme },
                         onToggleFavourite = { viewModel.toggleFavourite(it) },

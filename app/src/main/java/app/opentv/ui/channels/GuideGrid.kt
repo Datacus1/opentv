@@ -8,6 +8,8 @@ package app.opentv.ui.channels
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -36,6 +38,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -88,6 +91,7 @@ fun GuideGrid(
     focusRequestKey: Any? = null,
     focusRequestId: Int = 0,
     onSelectRow: (ChannelsViewModel.Row) -> Unit,
+    onOpenRowOptions: (ChannelsViewModel.Row) -> Unit,
     onFocusRow: (ChannelsViewModel.Row) -> Unit,
     onProgramme: (ChannelsViewModel.Row, Programme) -> Unit = { _, _ -> },
     onToggleFavourite: (ChannelsViewModel.Row) -> Unit = {},
@@ -132,6 +136,7 @@ fun GuideGrid(
                     isSelected = row.key == selectedKey,
                     focusRequester = if (row.key == focusRequestKey) returnFocus else null,
                     onSelect = { onSelectRow(row) },
+                    onOpenOptions = { onOpenRowOptions(row) },
                     onFocus = {
                         focusedRowKey = row.key
                         onFocusRow(row)
@@ -159,6 +164,7 @@ fun ChannelList(
     focusRequestKey: Any? = null,
     focusRequestId: Int = 0,
     onSelectRow: (ChannelsViewModel.Row) -> Unit,
+    onOpenRowOptions: (ChannelsViewModel.Row) -> Unit,
     onFocusRow: (ChannelsViewModel.Row) -> Unit,
     onToggleFavourite: (ChannelsViewModel.Row) -> Unit = {},
     onExitLeftFromChannel: () -> Boolean = { false },
@@ -188,6 +194,7 @@ fun ChannelList(
                 isSelected = row.key == selectedKey,
                 focusRequester = if (row.key == focusRequestKey) returnFocus else null,
                 onSelect = { onSelectRow(row) },
+                onOpenOptions = { onOpenRowOptions(row) },
                 onFocus = {
                     focusedRowKey = row.key
                     onFocusRow(row)
@@ -206,6 +213,7 @@ private fun ChannelListRow(
     isSelected: Boolean,
     focusRequester: FocusRequester?,
     onSelect: () -> Unit,
+    onOpenOptions: () -> Unit,
     onFocus: () -> Unit,
     onToggleFavourite: () -> Unit,
     onExitLeft: () -> Boolean,
@@ -232,7 +240,11 @@ private fun ChannelListRow(
                 focused = it.isFocused
                 if (it.isFocused) onFocus()
             }
-            .clickable(onClick = onSelect)
+            .guideChannelActivation(
+                enabled = focused,
+                onClick = onSelect,
+                onLongClick = onOpenOptions,
+            )
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -357,6 +369,7 @@ private fun GuideRow(
     isSelected: Boolean,
     focusRequester: FocusRequester?,
     onSelect: () -> Unit,
+    onOpenOptions: () -> Unit,
     onFocus: () -> Unit,
     onProgramme: (Programme) -> Unit,
     onToggleFavourite: () -> Unit = {},
@@ -395,7 +408,11 @@ private fun GuideRow(
                     focused = it.isFocused
                     if (it.isFocused) onFocus()
                 }
-                .clickable(onClick = onSelect)
+                .guideChannelActivation(
+                    enabled = focused,
+                    onClick = onSelect,
+                    onLongClick = onOpenOptions,
+                )
                 .padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -583,6 +600,53 @@ private suspend fun requestGuideRowFocus(requester: FocusRequester, isTargetFocu
         if (isTargetFocused()) return
     }
 }
+
+/**
+ * TV remotes report Select as key events, and Compose's pointer long-click detector does not
+ * consistently interpret Android TV key repeats. Classify the press on key-up using both the
+ * native long-press flag and elapsed hold time. Pointer/touch users still get combinedClickable.
+ * When the row's favourite child owns focus this handler is disabled, preserving the star action.
+ */
+@Composable
+@OptIn(ExperimentalFoundationApi::class)
+private fun Modifier.guideChannelActivation(
+    enabled: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+): Modifier {
+    var downAtMillis by remember { mutableLongStateOf(0L) }
+    var longPressReported by remember { mutableStateOf(false) }
+    return onPreviewKeyEvent { event ->
+        if (!enabled || !event.key.isGuideSelectKey()) return@onPreviewKeyEvent false
+        when (event.type) {
+            KeyEventType.KeyDown -> {
+                if (downAtMillis == 0L) downAtMillis = event.nativeKeyEvent.eventTime
+                if (event.nativeKeyEvent.isLongPress || event.nativeKeyEvent.repeatCount > 0) {
+                    longPressReported = true
+                }
+                true
+            }
+            KeyEventType.KeyUp -> {
+                val heldMillis = (event.nativeKeyEvent.eventTime - downAtMillis).coerceAtLeast(0L)
+                val action = GuideChannelActivationPolicy.action(
+                    heldMillis = heldMillis,
+                    systemReportedLongPress = longPressReported,
+                )
+                downAtMillis = 0L
+                longPressReported = false
+                when (action) {
+                    GuideChannelActivationPolicy.Action.WATCH -> onClick()
+                    GuideChannelActivationPolicy.Action.OPEN_OPTIONS -> onLongClick()
+                }
+                true
+            }
+            else -> true
+        }
+    }.combinedClickable(onClick = onClick, onLongClick = onLongClick)
+}
+
+private fun Key.isGuideSelectKey(): Boolean =
+    this == Key.DirectionCenter || this == Key.Enter || this == Key.NumPadEnter
 
 private const val GUIDE_RETURN_FOCUS_ATTEMPTS = 6
 private const val GUIDE_RETURN_INITIAL_DELAY_MILLIS = 100L
