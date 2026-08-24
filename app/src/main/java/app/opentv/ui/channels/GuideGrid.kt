@@ -41,6 +41,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -67,7 +68,9 @@ import coil.compose.AsyncImage
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * The programme guide: channels down the left, a scrolling time-line to the right, with
@@ -603,8 +606,10 @@ private suspend fun requestGuideRowFocus(requester: FocusRequester, isTargetFocu
 
 /**
  * TV remotes report Select as key events, and Compose's pointer long-click detector does not
- * consistently interpret Android TV key repeats. Classify the press on key-up using both the
- * native long-press flag and elapsed hold time. Pointer/touch users still get combinedClickable.
+ * consistently interpret Android TV key repeats. Start a timer on key-down so the menu opens as
+ * soon as the threshold is reached, without waiting for release. Native long-press/repeat events
+ * can trigger it earlier; key-up retains an elapsed-time fallback. Pointer/touch users still get
+ * combinedClickable.
  * When the row's favourite child owns focus this handler is disabled, preserving the star action.
  */
 @Composable
@@ -614,26 +619,57 @@ private fun Modifier.guideChannelActivation(
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ): Modifier {
-    var downAtMillis by remember { mutableLongStateOf(0L) }
-    var longPressReported by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    var activeDownTimeMillis by remember { mutableLongStateOf(0L) }
+    var longPressTriggered by remember { mutableStateOf(false) }
+    var longPressJob by remember { mutableStateOf<Job?>(null) }
     return onPreviewKeyEvent { event ->
         if (!enabled || !event.key.isGuideSelectKey()) return@onPreviewKeyEvent false
         when (event.type) {
             KeyEventType.KeyDown -> {
-                if (downAtMillis == 0L) downAtMillis = event.nativeKeyEvent.eventTime
-                if (event.nativeKeyEvent.isLongPress || event.nativeKeyEvent.repeatCount > 0) {
-                    longPressReported = true
+                val nativeEvent = event.nativeKeyEvent
+                if (activeDownTimeMillis != nativeEvent.downTime) {
+                    longPressJob?.cancel()
+                    activeDownTimeMillis = nativeEvent.downTime
+                    longPressTriggered = false
+                    val pressDownTimeMillis = nativeEvent.downTime
+                    longPressJob = scope.launch {
+                        delay(GuideChannelActivationPolicy.LONG_PRESS_MILLIS)
+                        if (
+                            activeDownTimeMillis == pressDownTimeMillis &&
+                            !longPressTriggered
+                        ) {
+                            longPressTriggered = true
+                            longPressJob = null
+                            onLongClick()
+                        }
+                    }
+                }
+                if (
+                    !longPressTriggered &&
+                    (nativeEvent.isLongPress || nativeEvent.repeatCount > 0)
+                ) {
+                    longPressJob?.cancel()
+                    longPressJob = null
+                    longPressTriggered = true
+                    onLongClick()
                 }
                 true
             }
             KeyEventType.KeyUp -> {
-                val heldMillis = (event.nativeKeyEvent.eventTime - downAtMillis).coerceAtLeast(0L)
+                longPressJob?.cancel()
+                longPressJob = null
+                val wasLongPress = longPressTriggered
+                val heldMillis = (
+                    event.nativeKeyEvent.eventTime - activeDownTimeMillis
+                ).coerceAtLeast(0L)
+                activeDownTimeMillis = 0L
+                longPressTriggered = false
+                if (wasLongPress) return@onPreviewKeyEvent true
                 val action = GuideChannelActivationPolicy.action(
                     heldMillis = heldMillis,
-                    systemReportedLongPress = longPressReported,
+                    systemReportedLongPress = false,
                 )
-                downAtMillis = 0L
-                longPressReported = false
                 when (action) {
                     GuideChannelActivationPolicy.Action.WATCH -> onClick()
                     GuideChannelActivationPolicy.Action.OPEN_OPTIONS -> onLongClick()
