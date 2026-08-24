@@ -163,6 +163,9 @@ fun HomeScreen(
     var recordTarget by remember { mutableStateOf<Pair<ChannelsViewModel.Row, Programme>?>(null) }
     // The channel whose OK menu (Watch / Record / Schedule) is open.
     var channelMenu by remember { mutableStateOf<ChannelsViewModel.Row?>(null) }
+    // A held Select opens the dialog before release. While true, the dialog consumes that same
+    // press's repeats and key-up so its initially focused Watch action cannot activate itself.
+    var guardChannelMenuSelectUntilRelease by remember { mutableStateOf(false) }
 
     // First time the user records or schedules while OpenTV isn't exempt from battery optimisation,
     // offer the exemption so the capture survives standby. Once per session; never blocks recording.
@@ -579,7 +582,13 @@ fun HomeScreen(
                         focusRequestKey = guideFocusTargetKey,
                         focusRequestId = guideFocusRequestId,
                         onSelectRow = { row -> requestLive(row.primary) },
-                        onOpenRowOptions = { row -> channelMenu = row },
+                        onOpenRowOptions = { row ->
+                            guardChannelMenuSelectUntilRelease = true
+                            channelMenu = row
+                        },
+                        onRowOptionsRelease = {
+                            guardChannelMenuSelectUntilRelease = false
+                        },
                         onFocusRow = onFocusChannel,
                         onToggleFavourite = { viewModel.toggleFavourite(it) },
                         onExitLeftFromChannel = onExitLeftChannel,
@@ -596,7 +605,13 @@ fun HomeScreen(
                         // A short OK watches immediately. Hold OK for Watch/external/record options.
                         // Programme blocks keep their separate record/schedule action dialog.
                         onSelectRow = { row -> requestLive(row.primary) },
-                        onOpenRowOptions = { row -> channelMenu = row },
+                        onOpenRowOptions = { row ->
+                            guardChannelMenuSelectUntilRelease = true
+                            channelMenu = row
+                        },
+                        onRowOptionsRelease = {
+                            guardChannelMenuSelectUntilRelease = false
+                        },
                         onFocusRow = onFocusChannel,
                         onProgramme = { row, programme -> recordTarget = row to programme },
                         onToggleFavourite = { viewModel.toggleFavourite(it) },
@@ -820,10 +835,28 @@ fun HomeScreen(
         val nowProg = menuRow.now
         val recordingThis = activeRecordings.firstOrNull { it.channelId == channel.id }
         val upcoming = menuRow.programmes.filter { it.startUtcMillis > nowMillis }.take(8)
-        Dialog(onDismissRequest = { channelMenu = null }) {
+        Dialog(
+            onDismissRequest = {
+                guardChannelMenuSelectUntilRelease = false
+                channelMenu = null
+            },
+        ) {
             Column(
                 Modifier
                     .width(480.dp)
+                    .onPreviewKeyEvent { event ->
+                        if (
+                            guardChannelMenuSelectUntilRelease &&
+                            event.key.isChannelMenuSelectKey()
+                        ) {
+                            if (event.type == KeyEventType.KeyUp) {
+                                guardChannelMenuSelectUntilRelease = false
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    }
                     .clip(RoundedCornerShape(16.dp))
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(20.dp),
@@ -932,6 +965,9 @@ fun HomeScreen(
         )
     }
 }
+
+private fun Key.isChannelMenuSelectKey(): Boolean =
+    this == Key.DirectionCenter || this == Key.Enter || this == Key.NumPadEnter
 
 /** Inserts a reminder for a future programme and arms its alarm. No-op if one already exists. */
 private suspend fun setReminder(

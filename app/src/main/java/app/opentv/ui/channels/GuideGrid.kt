@@ -95,6 +95,7 @@ fun GuideGrid(
     focusRequestId: Int = 0,
     onSelectRow: (ChannelsViewModel.Row) -> Unit,
     onOpenRowOptions: (ChannelsViewModel.Row) -> Unit,
+    onRowOptionsRelease: () -> Unit,
     onFocusRow: (ChannelsViewModel.Row) -> Unit,
     onProgramme: (ChannelsViewModel.Row, Programme) -> Unit = { _, _ -> },
     onToggleFavourite: (ChannelsViewModel.Row) -> Unit = {},
@@ -140,6 +141,7 @@ fun GuideGrid(
                     focusRequester = if (row.key == focusRequestKey) returnFocus else null,
                     onSelect = { onSelectRow(row) },
                     onOpenOptions = { onOpenRowOptions(row) },
+                    onOptionsRelease = onRowOptionsRelease,
                     onFocus = {
                         focusedRowKey = row.key
                         onFocusRow(row)
@@ -168,6 +170,7 @@ fun ChannelList(
     focusRequestId: Int = 0,
     onSelectRow: (ChannelsViewModel.Row) -> Unit,
     onOpenRowOptions: (ChannelsViewModel.Row) -> Unit,
+    onRowOptionsRelease: () -> Unit,
     onFocusRow: (ChannelsViewModel.Row) -> Unit,
     onToggleFavourite: (ChannelsViewModel.Row) -> Unit = {},
     onExitLeftFromChannel: () -> Boolean = { false },
@@ -198,6 +201,7 @@ fun ChannelList(
                 focusRequester = if (row.key == focusRequestKey) returnFocus else null,
                 onSelect = { onSelectRow(row) },
                 onOpenOptions = { onOpenRowOptions(row) },
+                onOptionsRelease = onRowOptionsRelease,
                 onFocus = {
                     focusedRowKey = row.key
                     onFocusRow(row)
@@ -217,6 +221,7 @@ private fun ChannelListRow(
     focusRequester: FocusRequester?,
     onSelect: () -> Unit,
     onOpenOptions: () -> Unit,
+    onOptionsRelease: () -> Unit,
     onFocus: () -> Unit,
     onToggleFavourite: () -> Unit,
     onExitLeft: () -> Boolean,
@@ -247,6 +252,7 @@ private fun ChannelListRow(
                 enabled = focused,
                 onClick = onSelect,
                 onLongClick = onOpenOptions,
+                onLongClickRelease = onOptionsRelease,
             )
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -373,6 +379,7 @@ private fun GuideRow(
     focusRequester: FocusRequester?,
     onSelect: () -> Unit,
     onOpenOptions: () -> Unit,
+    onOptionsRelease: () -> Unit,
     onFocus: () -> Unit,
     onProgramme: (Programme) -> Unit,
     onToggleFavourite: () -> Unit = {},
@@ -415,6 +422,7 @@ private fun GuideRow(
                     enabled = focused,
                     onClick = onSelect,
                     onLongClick = onOpenOptions,
+                    onLongClickRelease = onOptionsRelease,
                 )
                 .padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -618,6 +626,7 @@ private fun Modifier.guideChannelActivation(
     enabled: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    onLongClickRelease: () -> Unit,
 ): Modifier {
     val scope = rememberCoroutineScope()
     var activeDownTimeMillis by remember { mutableLongStateOf(0L) }
@@ -665,20 +674,34 @@ private fun Modifier.guideChannelActivation(
                 ).coerceAtLeast(0L)
                 activeDownTimeMillis = 0L
                 longPressTriggered = false
-                if (wasLongPress) return@onPreviewKeyEvent true
+                if (wasLongPress) {
+                    onLongClickRelease()
+                    return@onPreviewKeyEvent true
+                }
                 val action = GuideChannelActivationPolicy.action(
                     heldMillis = heldMillis,
                     systemReportedLongPress = false,
                 )
                 when (action) {
                     GuideChannelActivationPolicy.Action.WATCH -> onClick()
-                    GuideChannelActivationPolicy.Action.OPEN_OPTIONS -> onLongClick()
+                    GuideChannelActivationPolicy.Action.OPEN_OPTIONS -> {
+                        onLongClick()
+                        // This fallback opens on key-up, so no later release event is coming.
+                        onLongClickRelease()
+                    }
                 }
                 true
             }
             else -> true
         }
-    }.combinedClickable(onClick = onClick, onLongClick = onLongClick)
+    }.combinedClickable(
+        onClick = onClick,
+        onLongClick = {
+            // Pointer/touch long-clicks have no Select key-up for the dialog guard to observe.
+            onLongClick()
+            onLongClickRelease()
+        },
+    )
 }
 
 private fun Key.isGuideSelectKey(): Boolean =
