@@ -94,4 +94,36 @@ class GuidePreviewPolicyTest {
             ),
         )
     }
+
+    @Test
+    fun guideReturnSelectsTheRowContainingTheCurrentChannel() {
+        assertEquals(
+            1,
+            GuidePreviewPolicy.returningRowIndex(
+                currentChannelId = 42L,
+                rowChannelIds = listOf(setOf(10L), setOf(42L), setOf(99L)),
+            ),
+        )
+    }
+
+    @Test
+    fun guideReturnRecognizesAQualityVariantInItsParentRow() {
+        assertEquals(
+            1,
+            GuidePreviewPolicy.returningRowIndex(
+                currentChannelId = 43L,
+                rowChannelIds = listOf(setOf(10L), setOf(42L, 43L), setOf(99L)),
+            ),
+        )
+    }
+
+    @Test
+    fun guideReturnHasNoTargetWhenCurrentChannelIsNotVisible() {
+        assertNull(
+            GuidePreviewPolicy.returningRowIndex(
+                currentChannelId = 42L,
+                rowChannelIds = listOf(setOf(10L), setOf(99L)),
+            ),
+        )
+    }
 }

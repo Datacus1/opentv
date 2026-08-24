@@ -8,6 +8,8 @@ package app.opentv.ui.channels
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -24,6 +26,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -35,12 +38,16 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
@@ -61,6 +68,9 @@ import coil.compose.AsyncImage
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * The programme guide: channels down the left, a scrolling time-line to the right, with
@@ -81,7 +91,11 @@ fun GuideGrid(
     rows: List<ChannelsViewModel.Row>,
     windowStartMillis: Long,
     selectedKey: Any?,
+    focusRequestKey: Any? = null,
+    focusRequestId: Int = 0,
     onSelectRow: (ChannelsViewModel.Row) -> Unit,
+    onOpenRowOptions: (ChannelsViewModel.Row) -> Unit,
+    onRowOptionsRelease: () -> Unit,
     onFocusRow: (ChannelsViewModel.Row) -> Unit,
     onProgramme: (ChannelsViewModel.Row, Programme) -> Unit = { _, _ -> },
     onToggleFavourite: (ChannelsViewModel.Row) -> Unit = {},
@@ -92,10 +106,20 @@ fun GuideGrid(
     modifier: Modifier = Modifier,
 ) {
     val scroll = rememberScrollState()
+    val listState = rememberLazyListState()
+    val returnFocus = remember { FocusRequester() }
+    var focusedRowKey by remember { mutableStateOf<Any?>(null) }
     val now = System.currentTimeMillis()
     // Jumping to another day resets the horizontal scroll to that day's start; a within-day time
     // drift (dayOffset unchanged) leaves the user's scroll position untouched.
     androidx.compose.runtime.LaunchedEffect(dayOffset) { scroll.scrollTo(0) }
+    androidx.compose.runtime.LaunchedEffect(focusRequestId, focusRequestKey) {
+        val index = rows.indexOfFirst { it.key == focusRequestKey }
+        if (focusRequestId > 0 && index >= 0) {
+            listState.scrollToItem(index)
+            requestGuideRowFocus(returnFocus) { focusedRowKey == focusRequestKey }
+        }
+    }
 
     Column(modifier.fillMaxSize()) {
         // No pager buttons: the programme blocks are d-pad focusable, so moving right along a row
@@ -103,6 +127,7 @@ fun GuideGrid(
         TimeHeader(windowStartMillis, scroll)
 
         LazyColumn(
+            state = listState,
             contentPadding = PaddingValues(bottom = 16.dp),
             verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
@@ -113,8 +138,14 @@ fun GuideGrid(
                     nowMillis = now,
                     scroll = scroll,
                     isSelected = row.key == selectedKey,
+                    focusRequester = if (row.key == focusRequestKey) returnFocus else null,
                     onSelect = { onSelectRow(row) },
-                    onFocus = { onFocusRow(row) },
+                    onOpenOptions = { onOpenRowOptions(row) },
+                    onOptionsRelease = onRowOptionsRelease,
+                    onFocus = {
+                        focusedRowKey = row.key
+                        onFocusRow(row)
+                    },
                     onProgramme = { programme -> onProgramme(row, programme) },
                     onToggleFavourite = { onToggleFavourite(row) },
                     onExitLeft = onExitLeftFromChannel,
@@ -135,15 +166,30 @@ fun GuideGrid(
 fun ChannelList(
     rows: List<ChannelsViewModel.Row>,
     selectedKey: Any?,
+    focusRequestKey: Any? = null,
+    focusRequestId: Int = 0,
     onSelectRow: (ChannelsViewModel.Row) -> Unit,
+    onOpenRowOptions: (ChannelsViewModel.Row) -> Unit,
+    onRowOptionsRelease: () -> Unit,
     onFocusRow: (ChannelsViewModel.Row) -> Unit,
     onToggleFavourite: (ChannelsViewModel.Row) -> Unit = {},
     onExitLeftFromChannel: () -> Boolean = { false },
     modifier: Modifier = Modifier,
 ) {
     val now = System.currentTimeMillis()
+    val listState = rememberLazyListState()
+    val returnFocus = remember { FocusRequester() }
+    var focusedRowKey by remember { mutableStateOf<Any?>(null) }
+    androidx.compose.runtime.LaunchedEffect(focusRequestId, focusRequestKey) {
+        val index = rows.indexOfFirst { it.key == focusRequestKey }
+        if (focusRequestId > 0 && index >= 0) {
+            listState.scrollToItem(index)
+            requestGuideRowFocus(returnFocus) { focusedRowKey == focusRequestKey }
+        }
+    }
     LazyColumn(
         modifier = modifier.fillMaxSize(),
+        state = listState,
         contentPadding = PaddingValues(vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(3.dp),
     ) {
@@ -152,8 +198,14 @@ fun ChannelList(
                 row = row,
                 nowMillis = now,
                 isSelected = row.key == selectedKey,
+                focusRequester = if (row.key == focusRequestKey) returnFocus else null,
                 onSelect = { onSelectRow(row) },
-                onFocus = { onFocusRow(row) },
+                onOpenOptions = { onOpenRowOptions(row) },
+                onOptionsRelease = onRowOptionsRelease,
+                onFocus = {
+                    focusedRowKey = row.key
+                    onFocusRow(row)
+                },
                 onToggleFavourite = { onToggleFavourite(row) },
                 onExitLeft = onExitLeftFromChannel,
             )
@@ -166,7 +218,10 @@ private fun ChannelListRow(
     row: ChannelsViewModel.Row,
     nowMillis: Long,
     isSelected: Boolean,
+    focusRequester: FocusRequester?,
     onSelect: () -> Unit,
+    onOpenOptions: () -> Unit,
+    onOptionsRelease: () -> Unit,
     onFocus: () -> Unit,
     onToggleFavourite: () -> Unit,
     onExitLeft: () -> Boolean,
@@ -184,6 +239,7 @@ private fun ChannelListRow(
                 if (focused) Modifier.border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(8.dp))
                 else Modifier,
             )
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             // LEFT from a row reopens the collapsed rail, exactly like the grid's channel column.
             .onPreviewKeyEvent { e ->
                 if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionLeft) onExitLeft() else false
@@ -192,7 +248,12 @@ private fun ChannelListRow(
                 focused = it.isFocused
                 if (it.isFocused) onFocus()
             }
-            .clickable(onClick = onSelect)
+            .guideChannelActivation(
+                enabled = focused,
+                onClick = onSelect,
+                onLongClick = onOpenOptions,
+                onLongClickRelease = onOptionsRelease,
+            )
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -315,7 +376,10 @@ private fun GuideRow(
     nowMillis: Long,
     scroll: androidx.compose.foundation.ScrollState,
     isSelected: Boolean,
+    focusRequester: FocusRequester?,
     onSelect: () -> Unit,
+    onOpenOptions: () -> Unit,
+    onOptionsRelease: () -> Unit,
     onFocus: () -> Unit,
     onProgramme: (Programme) -> Unit,
     onToggleFavourite: () -> Unit = {},
@@ -342,6 +406,7 @@ private fun GuideRow(
                         2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(8.dp),
                     ) else Modifier,
                 )
+                .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
                 // LEFT from this leftmost column asks the host to reopen the collapsed category
                 // rail; onExitLeft consumes the key only when it handled it (rail was hidden), so
                 // moving left onto programme blocks and into an already-visible rail still works.
@@ -353,7 +418,12 @@ private fun GuideRow(
                     focused = it.isFocused
                     if (it.isFocused) onFocus()
                 }
-                .clickable(onClick = onSelect)
+                .guideChannelActivation(
+                    enabled = focused,
+                    onClick = onSelect,
+                    onLongClick = onOpenOptions,
+                    onLongClickRelease = onOptionsRelease,
+                )
                 .padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -526,6 +596,121 @@ private fun widthFor(fromMillis: Long, toMillis: Long): Dp {
 
 // A weak TV box will happily scroll this; the whole strip is ~12h * 60 * 4dp = ~2880dp wide.
 private const val MINUTE_DP = 4f
+/**
+ * Lazy rows are not guaranteed to have a focus target in the same frame as a scroll. Try
+ * again only while Compose rejects the request; once accepted, stop immediately so a fast user
+ * can move away with the d-pad without a later retry snapping focus back.
+ */
+private suspend fun requestGuideRowFocus(requester: FocusRequester, isTargetFocused: () -> Boolean) {
+    repeat(GUIDE_RETURN_FOCUS_ATTEMPTS) { attempt ->
+        if (isTargetFocused()) return
+        delay(if (attempt == 0) GUIDE_RETURN_INITIAL_DELAY_MILLIS else GUIDE_RETURN_RETRY_DELAY_MILLIS)
+        if (isTargetFocused()) return
+        runCatching { requester.requestFocus() }
+        delay(GUIDE_RETURN_SETTLE_DELAY_MILLIS)
+        if (isTargetFocused()) return
+    }
+}
+
+/**
+ * TV remotes report Select as key events, and Compose's pointer long-click detector does not
+ * consistently interpret Android TV key repeats. Start a timer on key-down so the menu opens as
+ * soon as the threshold is reached, without waiting for release. Native long-press/repeat events
+ * can trigger it earlier; key-up retains an elapsed-time fallback. Pointer/touch users still get
+ * combinedClickable.
+ * When the row's favourite child owns focus this handler is disabled, preserving the star action.
+ */
+@Composable
+@OptIn(ExperimentalFoundationApi::class)
+private fun Modifier.guideChannelActivation(
+    enabled: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    onLongClickRelease: () -> Unit,
+): Modifier {
+    val scope = rememberCoroutineScope()
+    var activeDownTimeMillis by remember { mutableLongStateOf(0L) }
+    var longPressTriggered by remember { mutableStateOf(false) }
+    var longPressJob by remember { mutableStateOf<Job?>(null) }
+    return onPreviewKeyEvent { event ->
+        if (!enabled || !event.key.isGuideSelectKey()) return@onPreviewKeyEvent false
+        when (event.type) {
+            KeyEventType.KeyDown -> {
+                val nativeEvent = event.nativeKeyEvent
+                if (activeDownTimeMillis != nativeEvent.downTime) {
+                    longPressJob?.cancel()
+                    activeDownTimeMillis = nativeEvent.downTime
+                    longPressTriggered = false
+                    val pressDownTimeMillis = nativeEvent.downTime
+                    longPressJob = scope.launch {
+                        delay(GuideChannelActivationPolicy.LONG_PRESS_MILLIS)
+                        if (
+                            activeDownTimeMillis == pressDownTimeMillis &&
+                            !longPressTriggered
+                        ) {
+                            longPressTriggered = true
+                            longPressJob = null
+                            onLongClick()
+                        }
+                    }
+                }
+                if (
+                    !longPressTriggered &&
+                    (nativeEvent.isLongPress || nativeEvent.repeatCount > 0)
+                ) {
+                    longPressJob?.cancel()
+                    longPressJob = null
+                    longPressTriggered = true
+                    onLongClick()
+                }
+                true
+            }
+            KeyEventType.KeyUp -> {
+                longPressJob?.cancel()
+                longPressJob = null
+                val wasLongPress = longPressTriggered
+                val heldMillis = (
+                    event.nativeKeyEvent.eventTime - activeDownTimeMillis
+                ).coerceAtLeast(0L)
+                activeDownTimeMillis = 0L
+                longPressTriggered = false
+                if (wasLongPress) {
+                    onLongClickRelease()
+                    return@onPreviewKeyEvent true
+                }
+                val action = GuideChannelActivationPolicy.action(
+                    heldMillis = heldMillis,
+                    systemReportedLongPress = false,
+                )
+                when (action) {
+                    GuideChannelActivationPolicy.Action.WATCH -> onClick()
+                    GuideChannelActivationPolicy.Action.OPEN_OPTIONS -> {
+                        onLongClick()
+                        // This fallback opens on key-up, so no later release event is coming.
+                        onLongClickRelease()
+                    }
+                }
+                true
+            }
+            else -> true
+        }
+    }.combinedClickable(
+        onClick = onClick,
+        onLongClick = {
+            // Pointer/touch long-clicks have no Select key-up for the dialog guard to observe.
+            onLongClick()
+            onLongClickRelease()
+        },
+    )
+}
+
+private fun Key.isGuideSelectKey(): Boolean =
+    this == Key.DirectionCenter || this == Key.Enter || this == Key.NumPadEnter
+
+private const val GUIDE_RETURN_FOCUS_ATTEMPTS = 6
+private const val GUIDE_RETURN_INITIAL_DELAY_MILLIS = 100L
+private const val GUIDE_RETURN_RETRY_DELAY_MILLIS = 250L
+private const val GUIDE_RETURN_SETTLE_DELAY_MILLIS = 50L
 private const val HOURS_IN_WINDOW = 24
 private const val HALF_HOUR_MS = 30 * 60 * 1000L
 private val CHANNEL_COLUMN = 220.dp
