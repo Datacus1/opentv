@@ -69,12 +69,12 @@ import java.util.Locale
  * ## Inline video
  * When [previewPlayer] is non-null the highlighted channel plays, muted, inside the card. The
  * earlier version of this that locked up cheap boxes ran a *second* decoder behind the
- * full-screen one; here there is only ever this single, muted, debounced player — and the
- * caller ([HomeScreen]) stops it before handing off to full-screen and whenever the screen is
- * backgrounded, so the device never has two decoders alive at once. Low-end boxes can turn the
- * whole thing off in settings, in which case [previewPlayer] is null and this falls back to the
- * logo. The logo stays behind the video as the shutter, so a buffering or failed stream still
- * shows something rather than a black hole.
+ * full-screen one. The caller now supplies the process-level live player shared with full-screen:
+ * navigation only moves its output between PlayerViews, so there is still one decoder and the
+ * same-channel transition does not reopen the stream. Leaving live TV stops the shared session.
+ * Low-end boxes can turn the preview off in settings, in which case [previewPlayer] is null and
+ * this falls back to the logo. The logo stays behind the video as the shutter, so a buffering or
+ * failed stream still shows something rather than a black hole.
  */
 @OptIn(UnstableApi::class)
 @Composable

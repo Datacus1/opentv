@@ -55,9 +55,9 @@ private const val LIVE_POLICY_TAG = "OpenTVLivePolicy"
  * nothing plays until the app is killed. That is the "changing channels too quickly causes
  * streams to fail" class of bug, and it is entirely self-inflicted.
  *
- * OpenTV keeps exactly one player for the lifetime of the screen and only ever swaps its
- * media item. Requests are debounced, and an in-flight switch is cancelled the moment a newer
- * one arrives, so holding channel-up costs one actual tune — the one the user stopped on.
+ * OpenTV keeps exactly one player for the lifetime of its owning playback session and only ever
+ * swaps its media item. Requests are debounced, and an in-flight switch is cancelled the moment a
+ * newer one arrives, so holding channel-up costs one actual tune — the one the user stopped on.
  */
 @OptIn(UnstableApi::class)
 class PlayerController(
