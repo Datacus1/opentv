@@ -14,8 +14,8 @@ android {
         applicationId = "app.opentv"
         minSdk = 23
         targetSdk = 35
-        versionCode = 32
-        versionName = "0.11.7-commercial-break.13-held-menu-guard"
+        versionCode = 36
+        versionName = "0.11.7-commercial-break.17-seamless-live-handoff"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

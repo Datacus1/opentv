@@ -98,6 +98,7 @@ import app.opentv.data.model.Channel
 import app.opentv.data.model.shownName
 import app.opentv.player.PlaybackQueue
 import app.opentv.player.PlayerController
+import app.opentv.player.LivePlaybackSession
 import app.opentv.ui.RecordingBackgroundDialog
 import app.opentv.ui.RecordingBackgroundPrompt
 import coil.compose.AsyncImage
@@ -133,14 +134,8 @@ fun PlayerScreen(
     val settings = remember { graph.settings }
     val scope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
     val subtitlesDefault by settings.subtitlesEnabled.collectAsState()
-    val controller = remember {
-        PlayerController(
-            context, scope, graph.streamingHttpClient,
-            subtitlesEnabled = settings.subtitlesEnabled.value,
-            // Opt-in shallow DVR so the transport's pause/rewind actually holds on a live stream.
-            dvr = settings.livePauseEnabled.value,
-        )
-    }
+    val liveSession = remember { graph.livePlaybackSession }
+    val controller = liveSession.controller
     val state by controller.state.collectAsState()
     val tracks by controller.tracks.collectAsState()
     // What's recording right now, so the Record button can show as armed for this channel.
@@ -151,13 +146,14 @@ fun PlayerScreen(
     // actually stops the system screensaver from firing mid-programme. keepScreenOn stays on too,
     // as a belt-and-braces backstop.
     DisposableEffect(Unit) {
+        liveSession.attach(LivePlaybackSession.Surface.PLAYER)
         val window = context.findActivity()?.window
         window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         view.keepScreenOn = true
         onDispose {
             window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             view.keepScreenOn = false
-            controller.release()
+            liveSession.detach(LivePlaybackSession.Surface.PLAYER)
             scope.cancel()
         }
     }
@@ -222,7 +218,7 @@ fun PlayerScreen(
             val source = graph.sourceRepository.byId(channel.sourceId)
             // Xtream/M3U carry a ready URL; a Stalker channel's URL is minted here from its cmd.
             val url = graph.catalogRepository.resolvePlaybackUrl(channel, source)
-            controller.play(
+            liveSession.play(
                 PlayerController.Request(
                     url = url,
                     title = channel.shownName,
@@ -275,6 +271,12 @@ fun PlayerScreen(
         tuneTo(variants.firstOrNull { it.id == channel.id } ?: channel)
     }
 
+    // The guide suppresses captions in its small preview. Re-apply the full-screen preference even
+    // when the same prepared media item is handed over and its tracks therefore do not change.
+    LaunchedEffect(subtitlesDefault) {
+        if (subtitlesDefault) controller.setSubtitlesEnabled(true) else controller.disableText()
+    }
+
     // Sleep timer: when the armed deadline passes, stop and leave the player. Re-arming from
     // settings restarts this effect with the new deadline.
     val sleepDeadline by SleepTimer.deadline.collectAsState()
@@ -283,7 +285,7 @@ fun PlayerScreen(
         val wait = d - System.currentTimeMillis()
         if (wait > 0) delay(wait)
         SleepTimer.clear()
-        controller.stop()
+        liveSession.stop()
         onBack()
     }
 
@@ -347,7 +349,7 @@ fun PlayerScreen(
                 // that same event from reaching MainScreen's exit handler during the transition.
                 if (event.key == Key.Back || event.key == Key.Escape) {
                     if (event.type == KeyEventType.KeyUp) {
-                        controller.stop()
+                        liveSession.prepareHandoff(LivePlaybackSession.Surface.GUIDE)
                         onBack()
                     }
                     return@onPreviewKeyEvent true

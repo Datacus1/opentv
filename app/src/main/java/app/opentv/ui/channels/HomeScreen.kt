@@ -8,6 +8,7 @@ package app.opentv.ui.channels
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -87,6 +88,7 @@ import app.opentv.data.model.shownName
 import app.opentv.reminders.ReminderScheduler
 import app.opentv.player.PlaybackQueue
 import app.opentv.player.PlayerController
+import app.opentv.player.LivePlaybackSession
 import app.opentv.ui.ChannelsViewModel
 import app.opentv.ui.RecordingBackgroundDialog
 import app.opentv.ui.RecordingBackgroundPrompt
@@ -94,10 +96,7 @@ import coil.compose.AsyncImage
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -126,6 +125,7 @@ fun HomeScreen(
     val context = LocalContext.current
     val graph = remember { ServiceLocator.get(context) }
     val settings = remember { graph.settings }
+    val liveSession = remember { graph.livePlaybackSession }
     val previewEnabled by settings.guidePreviewVideo.collectAsState()
     val previewMode by settings.guidePreviewMode.collectAsState()
     val channelLayout by settings.channelLayout.collectAsState()
@@ -166,6 +166,27 @@ fun HomeScreen(
     // A held Select opens the dialog before release. While true, the dialog consumes that same
     // press's repeats and key-up so its initially focused Watch action cannot activate itself.
     var guardChannelMenuSelectUntilRelease by remember { mutableStateOf(false) }
+    var channelMenuReleaseJob by remember { mutableStateOf<Job?>(null) }
+    fun armChannelMenuSelectGuard() {
+        channelMenuReleaseJob?.cancel()
+        channelMenuReleaseJob = null
+        guardChannelMenuSelectUntilRelease = true
+    }
+    fun releaseChannelMenuSelectGuardAfterEventTail() {
+        channelMenuReleaseJob?.cancel()
+        channelMenuReleaseJob = recordScope.launch {
+            // Compose can synthesize the focused row's click immediately after key-up. Keep every
+            // menu action inert until that tail of the original held press has drained.
+            delay(CHANNEL_MENU_RELEASE_TAIL_MILLIS)
+            guardChannelMenuSelectUntilRelease = false
+            channelMenuReleaseJob = null
+        }
+    }
+    fun clearChannelMenuSelectGuard() {
+        channelMenuReleaseJob?.cancel()
+        channelMenuReleaseJob = null
+        guardChannelMenuSelectUntilRelease = false
+    }
 
     // First time the user records or schedules while OpenTV isn't exempt from battery optimisation,
     // offer the exemption so the capture survives standby. Once per session; never blocks recording.
@@ -254,18 +275,14 @@ fun HomeScreen(
     }
 
     // ---- Live preview player -----------------------------------------------------------------
-    // One muted player, reused. It only ever decodes while the guide is the foreground screen,
-    // and is stopped before any hand-off to full-screen, so the box never runs two decoders at
-    // once — the thing that used to lock up cheap sticks.
-    val previewScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
-    val previewController = remember {
-        PlayerController(context, previewScope, graph.httpClient, subtitlesEnabled = false, preview = true)
-            .also { it.player.volume = 0f }
-    }
+    // The guide and full-screen destination share this controller. Only the PlayerView changes,
+    // so returning to the current channel can retain its decoder, media item and buffered data.
+    val previewController = liveSession.controller
     DisposableEffect(Unit) {
+        liveSession.attach(LivePlaybackSession.Surface.GUIDE)
+        previewController.disableText()
         onDispose {
-            previewController.release()
-            previewScope.cancel()
+            liveSession.detach(LivePlaybackSession.Surface.GUIDE)
         }
     }
 
@@ -277,7 +294,7 @@ fun HomeScreen(
         PlaybackQueue.items = rows.map {
             PlaybackQueue.Item(it.primary.id, it.primary.shownName, it.primary.logoUrl, it.primary.number)
         }
-        previewController.stop()
+        liveSession.prepareHandoff(LivePlaybackSession.Surface.PLAYER)
         onPlayChannel(channel)
     }
     fun requestLive(channel: Channel) {
@@ -290,6 +307,8 @@ fun HomeScreen(
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_RESUME -> {
+                    liveSession.attach(LivePlaybackSession.Surface.GUIDE)
+                    previewController.disableText()
                     // PlayerScreen writes this before playback begins. Re-read it every time the
                     // guide returns so Back restores that channel in both the preview and focus.
                     currentChannelId = settings.lastChannelId
@@ -299,7 +318,7 @@ fun HomeScreen(
                 }
                 Lifecycle.Event.ON_PAUSE -> {
                     screenResumed = false
-                    previewController.stop()
+                    liveSession.detach(LivePlaybackSession.Surface.GUIDE)
                 }
                 else -> Unit
             }
@@ -321,8 +340,8 @@ fun HomeScreen(
     }
 
     // Preview audio follows the setting. It defaults on so Back keeps the current channel audible.
-    LaunchedEffect(previewSound) {
-        previewController.player.volume = if (previewSound) 1f else 0f
+    LaunchedEffect(previewSound, screenResumed) {
+        if (screenResumed) previewController.player.volume = if (previewSound) 1f else 0f
     }
 
     // By default the preview returns to the channel that was playing full-screen and stays there
@@ -349,8 +368,9 @@ fun HomeScreen(
         screenResumed,
         recordingActive,
     ) {
-        if (!previewEnabled || !screenResumed || recordingActive || previewChannelId == null) {
-            previewController.stop()
+        if (!screenResumed) return@LaunchedEffect
+        if (!previewEnabled || recordingActive || previewChannelId == null) {
+            liveSession.stop()
             return@LaunchedEffect
         }
         val channel = if (previewChannelId == highlightedChannel?.id) {
@@ -358,11 +378,11 @@ fun HomeScreen(
         } else {
             graph.catalogRepository.channel(previewChannelId)
         } ?: highlightedChannel ?: run {
-            previewController.stop()
+            liveSession.stop()
             return@LaunchedEffect
         }
         val source = graph.sourceRepository.byId(channel.sourceId)
-        previewController.play(
+        liveSession.playPreview(
             PlayerController.Request(
                 url = channel.streamUrl,
                 title = channel.shownName,
@@ -548,7 +568,7 @@ fun HomeScreen(
                     },
                     onRefresh = onRefresh,
                     onAddSource = onAddSource,
-                    previewPlayer = if (previewVisible) previewController.player else null,
+                    previewPlayer = if (previewVisible && screenResumed) previewController.player else null,
                     isRecording = highlightedRow?.primary?.id?.let { id ->
                         activeRecordings.any { it.channelId == id }
                     } == true,
@@ -583,11 +603,11 @@ fun HomeScreen(
                         focusRequestId = guideFocusRequestId,
                         onSelectRow = { row -> requestLive(row.primary) },
                         onOpenRowOptions = { row ->
-                            guardChannelMenuSelectUntilRelease = true
+                            armChannelMenuSelectGuard()
                             channelMenu = row
                         },
                         onRowOptionsRelease = {
-                            guardChannelMenuSelectUntilRelease = false
+                            releaseChannelMenuSelectGuardAfterEventTail()
                         },
                         onFocusRow = onFocusChannel,
                         onToggleFavourite = { viewModel.toggleFavourite(it) },
@@ -606,11 +626,11 @@ fun HomeScreen(
                         // Programme blocks keep their separate record/schedule action dialog.
                         onSelectRow = { row -> requestLive(row.primary) },
                         onOpenRowOptions = { row ->
-                            guardChannelMenuSelectUntilRelease = true
+                            armChannelMenuSelectGuard()
                             channelMenu = row
                         },
                         onRowOptionsRelease = {
-                            guardChannelMenuSelectUntilRelease = false
+                            releaseChannelMenuSelectGuardAfterEventTail()
                         },
                         onFocusRow = onFocusChannel,
                         onProgramme = { row, programme -> recordTarget = row to programme },
@@ -835,12 +855,16 @@ fun HomeScreen(
         val nowProg = menuRow.now
         val recordingThis = activeRecordings.firstOrNull { it.channelId == channel.id }
         val upcoming = menuRow.programmes.filter { it.startUtcMillis > nowMillis }.take(8)
+        val heldPressFocusRequester = remember(menuRow.key) { FocusRequester() }
         Dialog(
             onDismissRequest = {
-                guardChannelMenuSelectUntilRelease = false
+                clearChannelMenuSelectGuard()
                 channelMenu = null
             },
         ) {
+            LaunchedEffect(menuRow.key) {
+                runCatching { heldPressFocusRequester.requestFocus() }
+            }
             Column(
                 Modifier
                     .width(480.dp)
@@ -850,7 +874,7 @@ fun HomeScreen(
                             event.key.isChannelMenuSelectKey()
                         ) {
                             if (event.type == KeyEventType.KeyUp) {
-                                guardChannelMenuSelectUntilRelease = false
+                                releaseChannelMenuSelectGuardAfterEventTail()
                             }
                             true
                         } else {
@@ -861,6 +885,15 @@ fun HomeScreen(
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(20.dp),
             ) {
+                // Own the remainder of the held press. Action rows stay disabled until the release
+                // guard drains, and focus remains here afterwards. The user must make a fresh
+                // directional choice before Select can activate Watch or another action.
+                Box(
+                    Modifier
+                        .size(1.dp)
+                        .focusRequester(heldPressFocusRequester)
+                        .focusable(),
+                )
                 Text(
                     channel.shownName,
                     style = MaterialTheme.typography.headlineSmall,
@@ -883,11 +916,17 @@ fun HomeScreen(
                     Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
-                    RecordActionRow(stringResource(R.string.guide_watch)) {
+                    RecordActionRow(
+                        stringResource(R.string.guide_watch),
+                        blockActivation = guardChannelMenuSelectUntilRelease,
+                    ) {
                         channelMenu = null
                         requestLive(channel)
                     }
-                    RecordActionRow(stringResource(R.string.guide_open_external)) {
+                    RecordActionRow(
+                        stringResource(R.string.guide_open_external),
+                        blockActivation = guardChannelMenuSelectUntilRelease,
+                    ) {
                         channelMenu = null
                         recordScope.launch {
                             val ua = graph.sourceRepository.byId(channel.sourceId)?.userAgent ?: "OpenTV/0.1 (Android)"
@@ -909,13 +948,21 @@ fun HomeScreen(
                         }
                     }
                     if (recordingThis != null) {
-                        RecordActionRow(stringResource(R.string.rec_stop_recording), primary = true) {
+                        RecordActionRow(
+                            stringResource(R.string.rec_stop_recording),
+                            primary = true,
+                            blockActivation = guardChannelMenuSelectUntilRelease,
+                        ) {
                             graph.recordingEngine.stop(recordingThis.id)
                             Toast.makeText(context, context.getString(R.string.rec_recording_stopped), Toast.LENGTH_SHORT).show()
                             channelMenu = null
                         }
                     } else {
-                        RecordActionRow(stringResource(R.string.guide_record_now_playing), primary = true) {
+                        RecordActionRow(
+                            stringResource(R.string.guide_record_now_playing),
+                            primary = true,
+                            blockActivation = guardChannelMenuSelectUntilRelease,
+                        ) {
                             recordScope.launch { graph.recordingEngine.startChannel(channel, nowProg) }
                             Toast.makeText(context, context.getString(R.string.rec_recording_started_see_tab, channel.shownName), Toast.LENGTH_LONG).show()
                             promptBackgroundIfNeeded()
@@ -923,7 +970,10 @@ fun HomeScreen(
                         }
                     }
                     if (nowProg != null) {
-                        RecordActionRow(stringResource(R.string.rec_record_series_named, nowProg.title)) {
+                        RecordActionRow(
+                            stringResource(R.string.rec_record_series_named, nowProg.title),
+                            blockActivation = guardChannelMenuSelectUntilRelease,
+                        ) {
                             recordScope.launch {
                                 graph.recordingEngine.recordSeries(channel, nowProg, menuRow.programmes)
                             }
@@ -941,7 +991,10 @@ fun HomeScreen(
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                         )
                         upcoming.forEach { programme ->
-                            RecordActionRow("${formatTime(programme.startUtcMillis)}   ${programme.title}") {
+                            RecordActionRow(
+                                "${formatTime(programme.startUtcMillis)}   ${programme.title}",
+                                blockActivation = guardChannelMenuSelectUntilRelease,
+                            ) {
                                 // Open the programme dialog so the choice is record, remind or auto-switch —
                                 // not a surprise one-tap recording.
                                 channelMenu = null
@@ -949,7 +1002,10 @@ fun HomeScreen(
                             }
                         }
                     }
-                    RecordActionRow(stringResource(R.string.common_cancel)) { channelMenu = null }
+                    RecordActionRow(
+                        stringResource(R.string.common_cancel),
+                        blockActivation = guardChannelMenuSelectUntilRelease,
+                    ) { channelMenu = null }
                 }
             }
         }
@@ -994,7 +1050,12 @@ private suspend fun setReminder(
 }
 
 @Composable
-private fun RecordActionRow(label: String, primary: Boolean = false, onClick: () -> Unit) {
+private fun RecordActionRow(
+    label: String,
+    primary: Boolean = false,
+    blockActivation: Boolean = false,
+    onClick: () -> Unit,
+) {
     var focused by remember { mutableStateOf(false) }
     val bg = when {
         focused -> MaterialTheme.colorScheme.primary
@@ -1017,7 +1078,10 @@ private fun RecordActionRow(label: String, primary: Boolean = false, onClick: ()
             .onFocusChanged { focused = it.isFocused }
             .clip(RoundedCornerShape(10.dp))
             .background(bg)
-            .clickable(onClick = onClick)
+            .clickable(
+                enabled = !blockActivation,
+                onClick = onClick,
+            )
             .padding(horizontal = 16.dp, vertical = 12.dp),
     )
 }
@@ -1266,6 +1330,7 @@ private fun EmptyState(onAddSource: () -> Unit) {
 }
 
 /** UTC in the database, device zone on screen. Converted here and nowhere else. */
+private const val CHANNEL_MENU_RELEASE_TAIL_MILLIS = 300L
 private val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
 
 private fun formatTime(utcMillis: Long): String = timeFormat.format(Date(utcMillis))

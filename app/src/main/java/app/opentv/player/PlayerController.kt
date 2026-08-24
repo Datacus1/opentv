@@ -356,14 +356,18 @@ class PlayerController(
      * @param debounce when true (the default for channel surfing) the switch waits briefly so
      * that rapid presses collapse into a single tune. Pass false for a deliberate selection.
      */
-    fun play(request: Request, debounce: Boolean = true) {
+    fun play(
+        request: Request,
+        debounce: Boolean = true,
+        debounceMillis: Long? = null,
+    ) {
         // Cancelling here is what makes fast channel-changing safe: the previous switch never
         // reaches the player, so we never stack prepares.
         switchJob?.cancel()
         current = request
 
         switchJob = scope.launch {
-            if (debounce) delay(switchDebounceMillis)
+            if (debounce) delay(debounceMillis ?: switchDebounceMillis)
 
             consecutiveFailures = 0
             currentReachedReady = false
@@ -410,6 +414,15 @@ class PlayerController(
 
     fun retry() {
         current?.let { play(it, debounce = false) }
+    }
+
+    /** Whether [request] is already the media item prepared by this player. */
+    fun canReuse(request: Request): Boolean {
+        val preparedUri = player.currentMediaItem?.localConfiguration?.uri?.toString()
+        return current?.channelId == request.channelId &&
+            current?.url == request.url &&
+            preparedUri == request.url &&
+            (_state.value is State.Buffering || _state.value is State.Playing)
     }
 
     /**
