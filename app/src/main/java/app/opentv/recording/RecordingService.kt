@@ -21,8 +21,10 @@ import app.opentv.core.ServiceLocator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.Call
 import okhttp3.Request
 import java.util.concurrent.ConcurrentHashMap
@@ -168,20 +170,27 @@ class RecordingService : Service() {
                 Log.w(TAG, "Recording $id failed", t)
             }
         } finally {
-            // The file is now at its final size — anyone watching it should see the true end.
-            RecordingLiveState.markInactive(id)
-            runCatching { sink?.close() }
-            val ok = total > 0 && error == null
-            runCatching {
-                repo.markFinished(
-                    id = id,
-                    ok = ok,
-                    atMillis = System.currentTimeMillis(),
-                    bytes = total,
-                    error = if (ok) null else (error ?: getString(R.string.rec_error_nothing)),
-                )
+            // A user stop cancels this coroutine. Cleanup must outlive that cancellation or Room's
+            // suspended status write is skipped, leaving a phantom RECORDING row that blocks live
+            // guide preview even though the capture service has already stopped.
+            withContext(NonCancellable) {
+                // The file is now at its final size — anyone watching it should see the true end.
+                RecordingLiveState.markInactive(id)
+                runCatching { sink?.close() }
+                val ok = total > 0 && error == null
+                runCatching {
+                    repo.markFinished(
+                        id = id,
+                        ok = ok,
+                        atMillis = System.currentTimeMillis(),
+                        bytes = total,
+                        error = if (ok) null else (error ?: getString(R.string.rec_error_nothing)),
+                    )
+                }.onFailure { throwable ->
+                    Log.e(TAG, "Recording $id could not persist final status", throwable)
+                }
+                finish(id)
             }
-            finish(id)
         }
     }
 
