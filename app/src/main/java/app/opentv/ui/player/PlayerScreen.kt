@@ -7,7 +7,6 @@ package app.opentv.ui.player
 
 import android.view.ViewGroup
 import android.view.WindowManager
-import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -319,22 +318,6 @@ fun PlayerScreen(
         }
     }
 
-    // Back steps back out one layer at a time — channel list, then picker, then the control bar —
-    // and only leaves the player once nothing is on screen. From immersive it's a single press out,
-    // so it never traps you, but it also no longer throws you all the way to the guide just because
-    // you wanted to dismiss the bar.
-    BackHandler {
-        when {
-            channelListVisible -> channelListVisible = false
-            panel != Panel.NONE -> panel = Panel.NONE
-            controlsVisible -> controlsVisible = false
-            else -> {
-                controller.stop()
-                onBack()
-            }
-        }
-    }
-
     // Number entry: once digits stop coming, jump to that channel number in the browsing list.
     LaunchedEffect(numberEntry) {
         if (numberEntry.isEmpty()) return@LaunchedEffect
@@ -360,11 +343,18 @@ fun PlayerScreen(
             .fillMaxSize()
             .background(Color.Black)
             .onPreviewKeyEvent { event ->
+                // Consume both halves of the TV remote's Back key here. Navigating on key-up keeps
+                // that same event from reaching MainScreen's exit handler during the transition.
+                if (event.key == Key.Back || event.key == Key.Escape) {
+                    if (event.type == KeyEventType.KeyUp) {
+                        controller.stop()
+                        onBack()
+                    }
+                    return@onPreviewKeyEvent true
+                }
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 val digit = keyToDigit(event.key)
                 when {
-                    // Never swallow Back/Escape — they must reach the back handler.
-                    event.key == Key.Back || event.key == Key.Escape -> false
                     // Typing a channel number jumps to it, TiviMate-style.
                     digit != null -> {
                         numberEntry = (numberEntry + digit).take(4)

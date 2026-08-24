@@ -39,6 +39,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -90,6 +91,7 @@ fun GuidePreview(
     canGoPrevDay: Boolean = false,
     onPrevDay: () -> Unit = {},
     onNextDay: () -> Unit = {},
+    watchFocusable: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     Row(
@@ -105,6 +107,10 @@ fun GuidePreview(
                 .aspectRatio(16f / 9f)
                 .clip(RoundedCornerShape(12.dp))
                 .background(Color.Black)
+                // Navigation remembers the preview card as the last focused control. While the
+                // guide is explicitly restoring a channel row after full-screen playback, keep
+                // that stale target out of focus search so it cannot immediately steal focus back.
+                .focusProperties { canFocus = watchFocusable }
                 .clickable(onClick = onWatch),
             contentAlignment = Alignment.Center,
         ) {

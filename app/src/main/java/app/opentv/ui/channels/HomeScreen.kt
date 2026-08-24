@@ -43,6 +43,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -142,6 +143,11 @@ fun HomeScreen(
     // setting for viewers who prefer the old browse-to-preview behaviour.
     var highlightedRow by remember { mutableStateOf<ChannelsViewModel.Row?>(null) }
     var currentChannelId by remember { mutableLongStateOf(settings.lastChannelId) }
+    var pendingGuideReturnSelection by remember { mutableStateOf(true) }
+    var returnFilterResetAttempted by remember { mutableStateOf(false) }
+    var guideFocusTargetKey by remember { mutableStateOf<Any?>(null) }
+    var guideFocusRequestId by remember { mutableIntStateOf(0) }
+    var awaitingGuideRowFocus by remember { mutableStateOf(true) }
     val previewSound by settings.guidePreviewSound.collectAsState()
     var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
 
@@ -195,9 +201,48 @@ fun HomeScreen(
         }
     }
 
-    // Keep the browsing highlight valid as the list changes (for example, switching category).
-    LaunchedEffect(rows) {
-        highlightedRow = rows.firstOrNull { it.key == highlightedRow?.key } ?: rows.firstOrNull()
+    // Returning from full-screen playback selects and focuses the row that contains the channel
+    // just watched. If a category/provider filter hides it, return once to All channels so the
+    // promised target is actually available. Later EPG refreshes preserve normal browsing focus.
+    LaunchedEffect(
+        rows,
+        pendingGuideReturnSelection,
+        currentChannelId,
+        selectedSource,
+        selectedCategory,
+        favouritesOnly,
+    ) {
+        if (rows.isEmpty()) return@LaunchedEffect
+        if (pendingGuideReturnSelection) {
+            val currentIndex = GuidePreviewPolicy.returningRowIndex(
+                currentChannelId = currentChannelId,
+                rowChannelIds = rows.map { row ->
+                    buildSet {
+                        add(row.primary.id)
+                        row.variants.forEach { add(it.id) }
+                    }
+                },
+            )
+            val filterActive = selectedSource != null || selectedCategory != null || favouritesOnly
+            if (currentChannelId > 0L && currentIndex == null && filterActive && !returnFilterResetAttempted) {
+                returnFilterResetAttempted = true
+                viewModel.selectSource(null)
+                return@LaunchedEffect
+            }
+            val target = currentIndex?.let(rows::get)
+                ?: rows.firstOrNull { it.key == highlightedRow?.key }
+                ?: rows.firstOrNull()
+            highlightedRow = target
+            pendingGuideReturnSelection = false
+            target?.let {
+                railExpanded = false
+                guideFocusTargetKey = it.key
+                awaitingGuideRowFocus = true
+                guideFocusRequestId++
+            }
+        } else {
+            highlightedRow = rows.firstOrNull { it.key == highlightedRow?.key } ?: rows.firstOrNull()
+        }
     }
 
     // ---- Live preview player -----------------------------------------------------------------
@@ -238,8 +283,10 @@ fun HomeScreen(
             when (event) {
                 Lifecycle.Event.ON_RESUME -> {
                     // PlayerScreen writes this before playback begins. Re-read it every time the
-                    // guide returns so Back immediately restores that same channel in the preview.
+                    // guide returns so Back restores that channel in both the preview and focus.
                     currentChannelId = settings.lastChannelId
+                    returnFilterResetAttempted = false
+                    pendingGuideReturnSelection = true
                     screenResumed = true
                 }
                 Lifecycle.Event.ON_PAUSE -> {
@@ -470,12 +517,14 @@ fun HomeScreen(
                     canGoPrevDay = guideDayOffset > 0,
                     onPrevDay = { viewModel.nudgeGuideDay(-1) },
                     onNextDay = { viewModel.nudgeGuideDay(1) },
+                    watchFocusable = !awaitingGuideRowFocus,
                 )
                 // Shared by both layouts: focus follows the highlight and collapses the rail; LEFT
                 // from the leftmost element reopens the rail (consumed only when it was hidden).
                 val onFocusChannel: (ChannelsViewModel.Row) -> Unit = {
                     highlightedRow = it
                     railExpanded = false
+                    if (it.key == guideFocusTargetKey) awaitingGuideRowFocus = false
                 }
                 val onExitLeftChannel: () -> Boolean = {
                     if (!railExpanded) {
@@ -490,6 +539,8 @@ fun HomeScreen(
                     ChannelList(
                         rows = rows,
                         selectedKey = highlightedRow?.key,
+                        focusRequestKey = guideFocusTargetKey,
+                        focusRequestId = guideFocusRequestId,
                         onSelectRow = { row -> channelMenu = row },
                         onFocusRow = onFocusChannel,
                         onToggleFavourite = { viewModel.toggleFavourite(it) },
@@ -502,6 +553,8 @@ fun HomeScreen(
                         windowStartMillis = windowStart,
                         dayOffset = guideDayOffset,
                         selectedKey = highlightedRow?.key,
+                        focusRequestKey = guideFocusTargetKey,
+                        focusRequestId = guideFocusRequestId,
                         // OK on a channel opens its menu: Watch, Record now, Schedule a later show,
                         // Record series. The preview already follows the highlight as you browse.
                         onSelectRow = { row -> channelMenu = row },

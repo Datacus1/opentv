@@ -29,4 +29,12 @@ internal object GuidePreviewPolicy {
     } else {
         highlightedChannelId
     }
+
+    /** Finds the guide row containing the last full-screen channel, including quality variants. */
+    fun returningRowIndex(
+        currentChannelId: Long,
+        rowChannelIds: List<Set<Long>>,
+    ): Int? = rowChannelIds
+        .indexOfFirst { currentChannelId > 0L && currentChannelId in it }
+        .takeIf { it >= 0 }
 }

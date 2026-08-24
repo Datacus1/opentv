@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -41,6 +42,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
@@ -61,6 +64,7 @@ import coil.compose.AsyncImage
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.delay
 
 /**
  * The programme guide: channels down the left, a scrolling time-line to the right, with
@@ -81,6 +85,8 @@ fun GuideGrid(
     rows: List<ChannelsViewModel.Row>,
     windowStartMillis: Long,
     selectedKey: Any?,
+    focusRequestKey: Any? = null,
+    focusRequestId: Int = 0,
     onSelectRow: (ChannelsViewModel.Row) -> Unit,
     onFocusRow: (ChannelsViewModel.Row) -> Unit,
     onProgramme: (ChannelsViewModel.Row, Programme) -> Unit = { _, _ -> },
@@ -92,10 +98,20 @@ fun GuideGrid(
     modifier: Modifier = Modifier,
 ) {
     val scroll = rememberScrollState()
+    val listState = rememberLazyListState()
+    val returnFocus = remember { FocusRequester() }
+    var focusedRowKey by remember { mutableStateOf<Any?>(null) }
     val now = System.currentTimeMillis()
     // Jumping to another day resets the horizontal scroll to that day's start; a within-day time
     // drift (dayOffset unchanged) leaves the user's scroll position untouched.
     androidx.compose.runtime.LaunchedEffect(dayOffset) { scroll.scrollTo(0) }
+    androidx.compose.runtime.LaunchedEffect(focusRequestId, focusRequestKey) {
+        val index = rows.indexOfFirst { it.key == focusRequestKey }
+        if (focusRequestId > 0 && index >= 0) {
+            listState.scrollToItem(index)
+            requestGuideRowFocus(returnFocus) { focusedRowKey == focusRequestKey }
+        }
+    }
 
     Column(modifier.fillMaxSize()) {
         // No pager buttons: the programme blocks are d-pad focusable, so moving right along a row
@@ -103,6 +119,7 @@ fun GuideGrid(
         TimeHeader(windowStartMillis, scroll)
 
         LazyColumn(
+            state = listState,
             contentPadding = PaddingValues(bottom = 16.dp),
             verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
@@ -113,8 +130,12 @@ fun GuideGrid(
                     nowMillis = now,
                     scroll = scroll,
                     isSelected = row.key == selectedKey,
+                    focusRequester = if (row.key == focusRequestKey) returnFocus else null,
                     onSelect = { onSelectRow(row) },
-                    onFocus = { onFocusRow(row) },
+                    onFocus = {
+                        focusedRowKey = row.key
+                        onFocusRow(row)
+                    },
                     onProgramme = { programme -> onProgramme(row, programme) },
                     onToggleFavourite = { onToggleFavourite(row) },
                     onExitLeft = onExitLeftFromChannel,
@@ -135,6 +156,8 @@ fun GuideGrid(
 fun ChannelList(
     rows: List<ChannelsViewModel.Row>,
     selectedKey: Any?,
+    focusRequestKey: Any? = null,
+    focusRequestId: Int = 0,
     onSelectRow: (ChannelsViewModel.Row) -> Unit,
     onFocusRow: (ChannelsViewModel.Row) -> Unit,
     onToggleFavourite: (ChannelsViewModel.Row) -> Unit = {},
@@ -142,8 +165,19 @@ fun ChannelList(
     modifier: Modifier = Modifier,
 ) {
     val now = System.currentTimeMillis()
+    val listState = rememberLazyListState()
+    val returnFocus = remember { FocusRequester() }
+    var focusedRowKey by remember { mutableStateOf<Any?>(null) }
+    androidx.compose.runtime.LaunchedEffect(focusRequestId, focusRequestKey) {
+        val index = rows.indexOfFirst { it.key == focusRequestKey }
+        if (focusRequestId > 0 && index >= 0) {
+            listState.scrollToItem(index)
+            requestGuideRowFocus(returnFocus) { focusedRowKey == focusRequestKey }
+        }
+    }
     LazyColumn(
         modifier = modifier.fillMaxSize(),
+        state = listState,
         contentPadding = PaddingValues(vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(3.dp),
     ) {
@@ -152,8 +186,12 @@ fun ChannelList(
                 row = row,
                 nowMillis = now,
                 isSelected = row.key == selectedKey,
+                focusRequester = if (row.key == focusRequestKey) returnFocus else null,
                 onSelect = { onSelectRow(row) },
-                onFocus = { onFocusRow(row) },
+                onFocus = {
+                    focusedRowKey = row.key
+                    onFocusRow(row)
+                },
                 onToggleFavourite = { onToggleFavourite(row) },
                 onExitLeft = onExitLeftFromChannel,
             )
@@ -166,6 +204,7 @@ private fun ChannelListRow(
     row: ChannelsViewModel.Row,
     nowMillis: Long,
     isSelected: Boolean,
+    focusRequester: FocusRequester?,
     onSelect: () -> Unit,
     onFocus: () -> Unit,
     onToggleFavourite: () -> Unit,
@@ -184,6 +223,7 @@ private fun ChannelListRow(
                 if (focused) Modifier.border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(8.dp))
                 else Modifier,
             )
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             // LEFT from a row reopens the collapsed rail, exactly like the grid's channel column.
             .onPreviewKeyEvent { e ->
                 if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionLeft) onExitLeft() else false
@@ -315,6 +355,7 @@ private fun GuideRow(
     nowMillis: Long,
     scroll: androidx.compose.foundation.ScrollState,
     isSelected: Boolean,
+    focusRequester: FocusRequester?,
     onSelect: () -> Unit,
     onFocus: () -> Unit,
     onProgramme: (Programme) -> Unit,
@@ -342,6 +383,7 @@ private fun GuideRow(
                         2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(8.dp),
                     ) else Modifier,
                 )
+                .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
                 // LEFT from this leftmost column asks the host to reopen the collapsed category
                 // rail; onExitLeft consumes the key only when it handled it (rail was hidden), so
                 // moving left onto programme blocks and into an already-visible rail still works.
@@ -526,6 +568,26 @@ private fun widthFor(fromMillis: Long, toMillis: Long): Dp {
 
 // A weak TV box will happily scroll this; the whole strip is ~12h * 60 * 4dp = ~2880dp wide.
 private const val MINUTE_DP = 4f
+/**
+ * Lazy rows are not guaranteed to have a focus target in the same frame as a scroll. Try
+ * again only while Compose rejects the request; once accepted, stop immediately so a fast user
+ * can move away with the d-pad without a later retry snapping focus back.
+ */
+private suspend fun requestGuideRowFocus(requester: FocusRequester, isTargetFocused: () -> Boolean) {
+    repeat(GUIDE_RETURN_FOCUS_ATTEMPTS) { attempt ->
+        if (isTargetFocused()) return
+        delay(if (attempt == 0) GUIDE_RETURN_INITIAL_DELAY_MILLIS else GUIDE_RETURN_RETRY_DELAY_MILLIS)
+        if (isTargetFocused()) return
+        runCatching { requester.requestFocus() }
+        delay(GUIDE_RETURN_SETTLE_DELAY_MILLIS)
+        if (isTargetFocused()) return
+    }
+}
+
+private const val GUIDE_RETURN_FOCUS_ATTEMPTS = 6
+private const val GUIDE_RETURN_INITIAL_DELAY_MILLIS = 100L
+private const val GUIDE_RETURN_RETRY_DELAY_MILLIS = 250L
+private const val GUIDE_RETURN_SETTLE_DELAY_MILLIS = 50L
 private const val HOURS_IN_WINDOW = 24
 private const val HALF_HOUR_MS = 30 * 60 * 1000L
 private val CHANNEL_COLUMN = 220.dp
