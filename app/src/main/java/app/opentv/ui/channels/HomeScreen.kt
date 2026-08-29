@@ -924,6 +924,19 @@ fun HomeScreen(
                         requestLive(channel)
                     }
                     RecordActionRow(
+                        stringResource(
+                            if (channel.favourite) {
+                                R.string.common_remove_favourite
+                            } else {
+                                R.string.common_favourite
+                            },
+                        ),
+                        blockActivation = guardChannelMenuSelectUntilRelease,
+                    ) {
+                        viewModel.toggleFavourite(menuRow)
+                        channelMenu = null
+                    }
+                    RecordActionRow(
                         stringResource(R.string.guide_open_external),
                         blockActivation = guardChannelMenuSelectUntilRelease,
                     ) {

@@ -14,8 +14,8 @@ android {
         applicationId = "app.opentv"
         minSdk = 23
         targetSdk = 35
-        versionCode = 36
-        versionName = "0.11.7-commercial-break.17-seamless-live-handoff"
+        versionCode = 37
+        versionName = "0.11.7-commercial-break.18-channel-menu-favourite"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
