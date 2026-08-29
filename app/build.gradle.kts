@@ -14,8 +14,8 @@ android {
         applicationId = "app.opentv"
         minSdk = 23
         targetSdk = 35
-        versionCode = 37
-        versionName = "0.11.7-commercial-break.18-channel-menu-favourite"
+        versionCode = 38
+        versionName = "0.11.7-commercial-break.19-held-menu-focus-clarity"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
