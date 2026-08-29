@@ -1031,7 +1031,6 @@ fun HomeScreen(
                     if (recordingThis != null) {
                         RecordActionRow(
                             stringResource(R.string.rec_stop_recording),
-                            primary = true,
                             blockActivation = guardChannelMenuSelectUntilRelease,
                         ) {
                             graph.recordingEngine.stop(recordingThis.id)
@@ -1041,7 +1040,6 @@ fun HomeScreen(
                     } else {
                         RecordActionRow(
                             stringResource(R.string.guide_record_now_playing),
-                            primary = true,
                             blockActivation = guardChannelMenuSelectUntilRelease,
                         ) {
                             recordScope.launch { graph.recordingEngine.startChannel(channel, nowProg) }
