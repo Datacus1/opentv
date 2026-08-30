@@ -19,17 +19,6 @@ internal object GuidePreviewPolicy {
         AppSettings.GuidePreviewMode.HIGHLIGHTED_CHANNEL -> highlightedChannelId
     }
 
-    /** The Watch control belongs to the video card, so it must open the video actually shown. */
-    fun watchChannelId(
-        previewVisible: Boolean,
-        previewChannelId: Long?,
-        highlightedChannelId: Long?,
-    ): Long? = if (previewVisible) {
-        previewChannelId ?: highlightedChannelId
-    } else {
-        highlightedChannelId
-    }
-
     /** Finds the guide row containing the last full-screen channel, including quality variants. */
     fun returningRowIndex(
         currentChannelId: Long,

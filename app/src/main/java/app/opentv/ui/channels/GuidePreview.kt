@@ -8,7 +8,6 @@ package app.opentv.ui.channels
 import android.view.ViewGroup
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -19,19 +18,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.FiberManualRecord
-import androidx.compose.material.icons.filled.KeyboardArrowLeft
-import androidx.compose.material.icons.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -63,8 +51,8 @@ import java.util.Locale
  *
  * As focus moves down the channel list, [row] follows it and the pane shows that channel's
  * logo alongside what's on now, how far through it is, what's next, and a synopsis when the
- * guide carries one — the "info on the EPG" people ask for before they'll judge a guide.
- * Pressing it plays the channel full-screen.
+ * guide carries one — the "info on the EPG" people ask for before they'll judge a guide. The
+ * pane is intentionally display-only so remote focus stays in the channel rows below it.
  *
  * ## Inline video
  * When [previewPlayer] is non-null the highlighted channel plays, muted, inside the card. The
@@ -81,17 +69,7 @@ import java.util.Locale
 fun GuidePreview(
     row: ChannelsViewModel.Row?,
     nowMillis: Long,
-    onWatch: () -> Unit,
-    onRefresh: () -> Unit,
-    onAddSource: () -> Unit,
     previewPlayer: ExoPlayer?,
-    isRecording: Boolean = false,
-    onRecord: () -> Unit = {},
-    dayLabel: String = "",
-    canGoPrevDay: Boolean = false,
-    onPrevDay: () -> Unit = {},
-    onNextDay: () -> Unit = {},
-    watchFocusable: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     Row(
@@ -100,18 +78,14 @@ fun GuidePreview(
             .height(212.dp)
             .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
-        // ---- Logo / "watch" card ----------------------------------------------------------
+        // ---- Display-only logo / live-preview card -----------------------------------------
         Box(
             Modifier
                 .fillMaxHeight()
                 .aspectRatio(16f / 9f)
                 .clip(RoundedCornerShape(12.dp))
                 .background(Color.Black)
-                // Navigation remembers the preview card as the last focused control. While the
-                // guide is explicitly restoring a channel row after full-screen playback, keep
-                // that stale target out of focus search so it cannot immediately steal focus back.
-                .focusProperties { canFocus = watchFocusable }
-                .clickable(onClick = onWatch),
+                .focusProperties { canFocus = false },
             contentAlignment = Alignment.Center,
         ) {
             // Logo sits behind everything as the fallback / shutter.
@@ -127,10 +101,14 @@ fun GuidePreview(
             // shutter means the logo behind shows through until the first frame arrives.
             if (previewPlayer != null && row != null) {
                 AndroidView(
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.fillMaxSize().focusProperties { canFocus = false },
                     factory = { ctx ->
                         PlayerView(ctx).apply {
                             useController = false
+                            isFocusable = false
+                            isFocusableInTouchMode = false
+                            isClickable = false
+                            descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
                             resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                             setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
                             setBackgroundColor(android.graphics.Color.TRANSPARENT)
@@ -144,76 +122,12 @@ fun GuidePreview(
                     update = { it.player = previewPlayer },
                 )
             }
-
-            Row(
-                Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(10.dp)
-                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(
-                    Icons.Default.PlayArrow,
-                    contentDescription = null,
-                    tint = Color.White,
-                    modifier = Modifier.size(16.dp),
-                )
-                Spacer(Modifier.width(4.dp))
-                Text(stringResource(R.string.guide_watch_label), color = Color.White, style = MaterialTheme.typography.labelMedium)
-            }
         }
 
         Spacer(Modifier.width(18.dp))
 
         // ---- Now / next detail ------------------------------------------------------------
         Column(Modifier.weight(1f).fillMaxHeight()) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                // ---- Day navigation (Sky Q-style): ‹ Today › ----------------------------
-                // Only shown once the caller wires a label in; keeps older callers unchanged.
-                if (dayLabel.isNotEmpty()) {
-                    IconButton(onClick = onPrevDay, enabled = canGoPrevDay) {
-                        Icon(
-                            Icons.Default.KeyboardArrowLeft,
-                            contentDescription = stringResource(R.string.guide_prev_day),
-                            tint = if (canGoPrevDay) MaterialTheme.colorScheme.onSurface
-                            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f),
-                        )
-                    }
-                    Text(
-                        dayLabel,
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                    )
-                    IconButton(onClick = onNextDay) {
-                        Icon(
-                            Icons.Default.KeyboardArrowRight,
-                            contentDescription = stringResource(R.string.guide_next_day),
-                        )
-                    }
-                }
-                Spacer(Modifier.weight(1f))
-                if (row != null) {
-                    IconButton(onClick = onRecord) {
-                        // Red throughout — the record convention — but the glyph switches to a
-                        // stop square while a recording is running, so a press visibly does
-                        // something (● start → ■ stop) rather than looking inert.
-                        Icon(
-                            if (isRecording) Icons.Default.Stop else Icons.Default.FiberManualRecord,
-                            contentDescription = if (isRecording) stringResource(R.string.guide_cd_stop_recording) else stringResource(R.string.guide_cd_record_now),
-                            tint = Color(0xFFE53935),
-                        )
-                    }
-                }
-                IconButton(onClick = onRefresh) {
-                    Icon(Icons.Default.Refresh, contentDescription = stringResource(R.string.guide_cd_refresh))
-                }
-                IconButton(onClick = onAddSource) {
-                    Icon(Icons.Default.Add, contentDescription = stringResource(R.string.guide_cd_add_source))
-                }
-            }
-
             if (row == null) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
                     Text(

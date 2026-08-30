@@ -152,7 +152,6 @@ fun HomeScreen(
     var returnFilterResetAttempted by remember { mutableStateOf(false) }
     var guideFocusTargetKey by remember { mutableStateOf<Any?>(null) }
     var guideFocusRequestId by remember { mutableIntStateOf(0) }
-    var awaitingGuideRowFocus by remember { mutableStateOf(true) }
     val previewSound by settings.guidePreviewSound.collectAsState()
     var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
 
@@ -266,7 +265,6 @@ fun HomeScreen(
             target?.let {
                 railExpanded = false
                 guideFocusTargetKey = it.key
-                awaitingGuideRowFocus = true
                 guideFocusRequestId++
             }
         } else {
@@ -357,11 +355,6 @@ fun HomeScreen(
         highlightedChannelId = highlightedChannel?.id,
     )
     val previewVisible = previewEnabled && !recordingActive
-    val watchChannelId = GuidePreviewPolicy.watchChannelId(
-        previewVisible = previewVisible,
-        previewChannelId = previewChannelId,
-        highlightedChannelId = highlightedChannel?.id,
-    )
     LaunchedEffect(
         previewChannelId,
         previewEnabled,
@@ -527,64 +520,16 @@ fun HomeScreen(
                     else -> EmptyState(onAddSource)
                 }
             } else {
-                // Hand the player the list you're browsing so it can zap channel up/down.
-                fun goFullscreen(channel: Channel) = requestLive(channel)
-
-                // Record the highlighted channel's now-programme (bounded to its end), or stop it
-                // if it's already recording. Powers the preview pane's quick record dot.
-                fun recordSelected() {
-                    val row = highlightedRow ?: return
-                    val active = activeRecordings.firstOrNull { it.channelId == row.primary.id }
-                    if (active != null) {
-                        graph.recordingEngine.stop(active.id)
-                        Toast.makeText(context, context.getString(R.string.rec_recording_stopped), Toast.LENGTH_SHORT).show()
-                    } else {
-                        recordScope.launch { graph.recordingEngine.startChannel(row.primary, row.now) }
-                        Toast.makeText(context, context.getString(R.string.rec_recording_started_see_tab, row.primary.shownName), Toast.LENGTH_LONG).show()
-                        promptBackgroundIfNeeded()
-                    }
-                }
-
-                val dayLabel = when (guideDayOffset) {
-                    0 -> stringResource(R.string.guide_today)
-                    1 -> stringResource(R.string.guide_tomorrow)
-                    else -> remember(windowStart) {
-                        SimpleDateFormat("EEE d MMM", Locale.getDefault()).format(Date(windowStart))
-                    }
-                }
                 GuidePreview(
                     row = highlightedRow,
                     nowMillis = nowMillis,
-                    onWatch = {
-                        watchChannelId?.let { id ->
-                            if (id == highlightedChannel?.id) {
-                                highlightedChannel?.let(::goFullscreen)
-                            } else {
-                                recordScope.launch {
-                                    graph.catalogRepository.channel(id)?.let(::goFullscreen)
-                                }
-                            }
-                        }
-                    },
-                    onRefresh = onRefresh,
-                    onAddSource = onAddSource,
                     previewPlayer = if (previewVisible && screenResumed) previewController.player else null,
-                    isRecording = highlightedRow?.primary?.id?.let { id ->
-                        activeRecordings.any { it.channelId == id }
-                    } == true,
-                    onRecord = { recordSelected() },
-                    dayLabel = dayLabel,
-                    canGoPrevDay = guideDayOffset > 0,
-                    onPrevDay = { viewModel.nudgeGuideDay(-1) },
-                    onNextDay = { viewModel.nudgeGuideDay(1) },
-                    watchFocusable = !awaitingGuideRowFocus,
                 )
                 // Shared by both layouts: focus follows the highlight and collapses the rail; LEFT
                 // from the leftmost element reopens the rail (consumed only when it was hidden).
                 val onFocusChannel: (ChannelsViewModel.Row) -> Unit = {
                     highlightedRow = it
                     railExpanded = false
-                    if (it.key == guideFocusTargetKey) awaitingGuideRowFocus = false
                 }
                 val onExitLeftChannel: () -> Boolean = {
                     if (!railExpanded) {
