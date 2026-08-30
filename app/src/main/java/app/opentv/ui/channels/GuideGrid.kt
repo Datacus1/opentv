@@ -25,7 +25,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -131,9 +131,11 @@ fun GuideGrid(
             contentPadding = PaddingValues(bottom = 16.dp),
             verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
-            items(rows, key = { it.key }) { row ->
+            itemsIndexed(rows, key = { _, row -> row.key }) { index, row ->
                 GuideRow(
                     row = row,
+                    isFirstRow = index == 0,
+                    isLastRow = index == rows.lastIndex,
                     windowStartMillis = windowStartMillis,
                     nowMillis = now,
                     scroll = scroll,
@@ -193,9 +195,11 @@ fun ChannelList(
         contentPadding = PaddingValues(vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(3.dp),
     ) {
-        items(rows, key = { it.key }) { row ->
+        itemsIndexed(rows, key = { _, row -> row.key }) { index, row ->
             ChannelListRow(
                 row = row,
+                isFirstRow = index == 0,
+                isLastRow = index == rows.lastIndex,
                 nowMillis = now,
                 isSelected = row.key == selectedKey,
                 focusRequester = if (row.key == focusRequestKey) returnFocus else null,
@@ -216,6 +220,8 @@ fun ChannelList(
 @Composable
 private fun ChannelListRow(
     row: ChannelsViewModel.Row,
+    isFirstRow: Boolean,
+    isLastRow: Boolean,
     nowMillis: Long,
     isSelected: Boolean,
     focusRequester: FocusRequester?,
@@ -242,7 +248,13 @@ private fun ChannelListRow(
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             // LEFT from a row reopens the collapsed rail, exactly like the grid's channel column.
             .onPreviewKeyEvent { e ->
-                if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionLeft) onExitLeft() else false
+                when {
+                    e.type != KeyEventType.KeyDown -> false
+                    isFirstRow && e.key == Key.DirectionUp -> true
+                    isLastRow && e.key == Key.DirectionDown -> true
+                    e.key == Key.DirectionLeft -> onExitLeft()
+                    else -> false
+                }
             }
             .onFocusChanged {
                 focused = it.isFocused
@@ -372,6 +384,8 @@ private fun TimeHeader(windowStartMillis: Long, scroll: androidx.compose.foundat
 @Composable
 private fun GuideRow(
     row: ChannelsViewModel.Row,
+    isFirstRow: Boolean,
+    isLastRow: Boolean,
     windowStartMillis: Long,
     nowMillis: Long,
     scroll: androidx.compose.foundation.ScrollState,
@@ -389,7 +403,22 @@ private fun GuideRow(
     // channel the preview is playing — it only changes when you press OK.
     var focused by remember { mutableStateOf(false) }
 
-    Row(Modifier.fillMaxWidth().height(ROW_HEIGHT)) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .height(ROW_HEIGHT)
+            // Never let a held vertical direction fall out of the lazy guide at either edge.
+            // Without this boundary Compose's spatial search can choose MainScreen's global rail.
+            .onPreviewKeyEvent { event ->
+                val direction = event.key.guideVerticalDirection()
+                event.type == KeyEventType.KeyDown && direction != null &&
+                    GuideVerticalFocusBoundary.shouldConsume(
+                        blockUp = isFirstRow,
+                        blockDown = isLastRow,
+                        direction = direction,
+                    )
+            },
+    ) {
 
         // ---- Fixed channel cell (does not scroll) --------------------------------------
         Row(
@@ -610,6 +639,12 @@ private suspend fun requestGuideRowFocus(requester: FocusRequester, isTargetFocu
         delay(GUIDE_RETURN_SETTLE_DELAY_MILLIS)
         if (isTargetFocused()) return
     }
+}
+
+private fun Key.guideVerticalDirection(): GuideDirectionRepeatGate.Direction? = when (this) {
+    Key.DirectionUp -> GuideDirectionRepeatGate.Direction.UP
+    Key.DirectionDown -> GuideDirectionRepeatGate.Direction.DOWN
+    else -> null
 }
 
 /**

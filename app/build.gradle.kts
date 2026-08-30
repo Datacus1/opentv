@@ -14,8 +14,8 @@ android {
         applicationId = "app.opentv"
         minSdk = 23
         targetSdk = 35
-        versionCode = 39
-        versionName = "0.11.7-commercial-break.20-display-only-guide-header"
+        versionCode = 40
+        versionName = "0.11.7-commercial-break.21-guide-navigation-stability"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
