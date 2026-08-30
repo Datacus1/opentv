@@ -8,6 +8,7 @@ package app.opentv.ui.channels
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,6 +29,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
@@ -208,18 +210,39 @@ fun HomeScreen(
         label = "railWidth",
     )
     val railFocusRequester = remember { FocusRequester() }
-    // Set when LEFT reopens the rail; the effect waits for the rail to be laid out again before
-    // moving focus onto it — a just-revealed node isn't focusable on the very same frame.
+    val railListState = rememberLazyListState()
+    var railHasFocus by remember { mutableStateOf(false) }
+    // Set when LEFT reopens the rail. It remains true until the rail confirms that one of its
+    // entries owns focus, so another LEFT cannot escape to the app-wide navigation rail while the
+    // width animation or a busy guide frame is still in progress.
     var pendingRailFocus by remember { mutableStateOf(false) }
-    LaunchedEffect(pendingRailFocus) {
-        if (pendingRailFocus) {
-            delay(50)
-            // runCatching: if the selected category is scrolled out of the rail's list it may not
-            // be composed; a second LEFT press then still reaches the rail by ordinary navigation.
-            runCatching { railFocusRequester.requestFocus() }
-            pendingRailFocus = false
+    val railFocusCategoryKey = remember(selectedCategory, categories) {
+        selectedCategory?.takeIf { selected -> categories.any { it.key == selected } }
+    }
+    val selectedRailIndex = remember(sources, favouritesOnly, railFocusCategoryKey, categories) {
+        val providerPrefix = if (sources.size > 1) sources.size + 3 else 0
+        when {
+            favouritesOnly -> providerPrefix
+            railFocusCategoryKey == null -> providerPrefix + 1
+            else -> {
+                val categoryIndex = categories.indexOfFirst { it.key == railFocusCategoryKey }
+                providerPrefix + 2 + categoryIndex
+            }
         }
     }
+    LaunchedEffect(pendingRailFocus, selectedRailIndex) {
+        while (pendingRailFocus && !railHasFocus) {
+            // The selected category can be outside the lazy rail's composed viewport. Bring it
+            // into composition first, then retry focus after layout until the rail confirms it.
+            runCatching { railListState.scrollToItem(selectedRailIndex) }
+            delay(RAIL_FOCUS_RETRY_MILLIS)
+            runCatching { railFocusRequester.requestFocus() }
+            delay(RAIL_FOCUS_RETRY_MILLIS)
+        }
+        if (railHasFocus) pendingRailFocus = false
+    }
+
+    val directionRepeatGate = remember { GuideDirectionRepeatGate() }
 
     // Re-evaluate "now" once a minute so progress bars advance without leaving the screen.
     LaunchedEffect(Unit) {
@@ -418,11 +441,30 @@ fun HomeScreen(
             // event halves here and navigate on key-up so guide Back resumes the last watched
             // channel without leaking into either MainScreen or the newly-opened PlayerScreen.
             .onPreviewKeyEvent { event ->
-                if (guideBackEnabled && (event.key == Key.Back || event.key == Key.Escape)) {
-                    if (event.type == KeyEventType.KeyUp) returnToCurrentChannel()
-                    true
-                } else {
-                    false
+                val verticalDirection = when (event.key) {
+                    Key.DirectionUp -> GuideDirectionRepeatGate.Direction.UP
+                    Key.DirectionDown -> GuideDirectionRepeatGate.Direction.DOWN
+                    else -> null
+                }
+                when {
+                    // Consume both halves of LEFT while the inner rail is taking focus. This is
+                    // the containment boundary that prevents fallback focus search from reaching
+                    // MainScreen's OpenTV / Live TV / Recordings rail.
+                    pendingRailFocus && event.key == Key.DirectionLeft -> true
+                    guideBackEnabled && (event.key == Key.Back || event.key == Key.Escape) -> {
+                        if (event.type == KeyEventType.KeyUp) returnToCurrentChannel()
+                        true
+                    }
+                    event.type == KeyEventType.KeyDown && verticalDirection != null &&
+                        directionRepeatGate.shouldConsume(
+                            direction = verticalDirection,
+                            eventTimeMillis = event.nativeKeyEvent.eventTime,
+                        ) -> true
+                    event.type == KeyEventType.KeyDown && verticalDirection == null -> {
+                        directionRepeatGate.reset()
+                        false
+                    }
+                    else -> false
                 }
             },
     ) {
@@ -436,6 +478,11 @@ fun HomeScreen(
                 .fillMaxHeight()
                 .background(MaterialTheme.colorScheme.surface)
                 .clipToBounds()
+                .focusGroup()
+                .onFocusChanged {
+                    railHasFocus = it.hasFocus
+                    if (it.hasFocus) pendingRailFocus = false
+                }
                 .padding(vertical = 16.dp),
         ) {
             Text(
@@ -447,6 +494,7 @@ fun HomeScreen(
             // The top "Search channels" bar was removed — Search now lives in the global nav rail.
 
             LazyColumn(
+                state = railListState,
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
@@ -466,6 +514,7 @@ fun HomeScreen(
                             label = stringResource(R.string.channels_manager_all_sources),
                             selected = selectedSource == null,
                             onClick = { viewModel.selectSource(null) },
+                            modifier = Modifier.containRailVerticalFocus(blockUp = true),
                         )
                     }
                     items(sources, key = { "src-${it.id}" }) { source ->
@@ -484,16 +533,27 @@ fun HomeScreen(
                         label = stringResource(R.string.guide_favourites),
                         selected = favouritesOnly,
                         onClick = viewModel::selectFavourites,
-                        modifier = if (favouritesOnly) Modifier.focusRequester(railFocusRequester) else Modifier,
+                        modifier = Modifier
+                            .containRailVerticalFocus(blockUp = sources.size <= 1)
+                            .then(
+                                if (favouritesOnly) Modifier.focusRequester(railFocusRequester)
+                                else Modifier,
+                            ),
                     )
                 }
                 item {
                     val allSelected = !favouritesOnly && selectedCategory == null
+                    val allReceivesFocus = !favouritesOnly && railFocusCategoryKey == null
                     RailEntry(
                         label = stringResource(R.string.guide_all_channels),
                         selected = allSelected,
                         onClick = { viewModel.selectCategory(null) },
-                        modifier = if (allSelected) Modifier.focusRequester(railFocusRequester) else Modifier,
+                        modifier = Modifier
+                            .containRailVerticalFocus(blockDown = categories.isEmpty())
+                            .then(
+                                if (allReceivesFocus) Modifier.focusRequester(railFocusRequester)
+                                else Modifier,
+                            ),
                     )
                 }
                 items(categories, key = { it.key }) { group ->
@@ -502,7 +562,15 @@ fun HomeScreen(
                         label = group.label,
                         selected = groupSelected,
                         onClick = { viewModel.selectCategory(group.key) },
-                        modifier = if (groupSelected) Modifier.focusRequester(railFocusRequester) else Modifier,
+                        modifier = Modifier
+                            .containRailVerticalFocus(blockDown = group.key == categories.lastOrNull()?.key)
+                            .then(
+                                if (!favouritesOnly && group.key == railFocusCategoryKey) {
+                                    Modifier.focusRequester(railFocusRequester)
+                                } else {
+                                    Modifier
+                                },
+                            ),
                     )
                 }
             }
@@ -584,9 +652,10 @@ fun HomeScreen(
                     highlightedRow = it
                     railExpanded = false
                     if (it.key == guideFocusTargetKey) awaitingGuideRowFocus = false
+                    pendingRailFocus = false
                 }
                 val onExitLeftChannel: () -> Boolean = {
-                    if (!railExpanded) {
+                    if (!railHasFocus) {
                         railExpanded = true
                         pendingRailFocus = true
                         true
@@ -1024,6 +1093,19 @@ fun HomeScreen(
 private fun Key.isChannelMenuSelectKey(): Boolean =
     this == Key.DirectionCenter || this == Key.Enter || this == Key.NumPadEnter
 
+private fun Modifier.containRailVerticalFocus(
+    blockUp: Boolean = false,
+    blockDown: Boolean = false,
+): Modifier = onPreviewKeyEvent { event ->
+    val direction = when (event.key) {
+        Key.DirectionUp -> GuideDirectionRepeatGate.Direction.UP
+        Key.DirectionDown -> GuideDirectionRepeatGate.Direction.DOWN
+        else -> null
+    }
+    event.type == KeyEventType.KeyDown && direction != null &&
+        GuideVerticalFocusBoundary.shouldConsume(blockUp, blockDown, direction)
+}
+
 /** Inserts a reminder for a future programme and arms its alarm. No-op if one already exists. */
 private suspend fun setReminder(
     graph: ServiceLocator.Graph,
@@ -1330,6 +1412,7 @@ private fun EmptyState(onAddSource: () -> Unit) {
 
 /** UTC in the database, device zone on screen. Converted here and nowhere else. */
 private const val CHANNEL_MENU_RELEASE_TAIL_MILLIS = 300L
+private const val RAIL_FOCUS_RETRY_MILLIS = 16L
 private val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
 
 private fun formatTime(utcMillis: Long): String = timeFormat.format(Date(utcMillis))
