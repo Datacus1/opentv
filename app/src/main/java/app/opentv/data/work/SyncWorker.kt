@@ -113,7 +113,10 @@ class SyncWorker(
 
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
                 WORK_NAME,
-                ExistingPeriodicWorkPolicy.KEEP,
+                // UPDATE is required here: KEEP would preserve the six-hour request created by an
+                // older build, so an in-place upgrade would never acquire the new storage-not-low
+                // constraint. UPDATE retains the cadence while applying the current safeguards.
+                ExistingPeriodicWorkPolicy.UPDATE,
                 request,
             )
         }
