@@ -403,6 +403,10 @@ interface ProgrammeDao {
     @Query("SELECT COUNT(*) FROM programmes WHERE feedId = :feedId")
     suspend fun countForFeed(feedId: Long): Int
 
+    /** Furthest point covered by this feed's on-disk guide, or null before its first good sync. */
+    @Query("SELECT MAX(endUtcMillis) FROM programmes WHERE feedId = :feedId")
+    suspend fun latestEndForFeed(feedId: Long): Long?
+
     /** Distinct guide channels that actually have programmes — the match report's baseline. */
     @Query("SELECT DISTINCT epgChannelId FROM programmes")
     suspend fun channelIdsWithProgrammes(): List<String>
@@ -416,6 +420,23 @@ interface ProgrammeDao {
 
     @Query("DELETE FROM programmes WHERE feedId = :feedId")
     suspend fun deleteForFeed(feedId: Long)
+
+    /**
+     * Removes at most [limit] rows for one feed.
+     *
+     * A large XMLTV cache can contain hundreds of thousands of rows. Deleting it in one statement
+     * holds Room's writer connection long enough to starve guide reads on TV hardware, making the
+     * app appear frozen. The repository repeats this bounded query and yields between batches.
+     */
+    @Query(
+        """
+        DELETE FROM programmes
+        WHERE id IN (
+            SELECT id FROM programmes WHERE feedId = :feedId LIMIT :limit
+        )
+        """
+    )
+    suspend fun deleteBatchForFeed(feedId: Long, limit: Int): Int
 }
 
 @Dao

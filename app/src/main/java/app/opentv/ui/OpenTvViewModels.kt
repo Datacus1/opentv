@@ -166,7 +166,14 @@ class SourcesViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun delete(source: Source) {
-        viewModelScope.launch { graph.catalogRepository.deleteSource(source.id) }
+        viewModelScope.launch {
+            // Remove the provider-owned EPG cache as one logical operation with the catalogue.
+            // Otherwise aliases and programmes from a deleted backup can keep matching live rows.
+            graph.epgRepository.removeProviderFeed(source.id)
+            graph.catalogRepository.deleteSource(source.id)
+            // Recompute matches immediately against only the feeds that still exist.
+            graph.epgRepository.runMatcher()
+        }
     }
 
     /**

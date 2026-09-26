@@ -24,6 +24,7 @@ import java.util.concurrent.TimeUnit
 import java.util.zip.GZIPInputStream
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -100,10 +101,27 @@ class EpgRepository(
 
     suspend fun removeFeed(feed: EpgFeed) {
         // A removed feed takes its guide data with it — orphaned programmes would otherwise
-        // keep matching channels forever with content that never refreshes.
-        programmeDao.deleteForFeed(feed.id)
+        // keep matching channels forever with content that never refreshes. Work in bounded
+        // transactions: one giant DELETE can monopolise Room's writer for minutes when a feed has
+        // a very large cache, starving the guide's normal read query and freezing the UI.
+        do {
+            val removed = programmeDao.deleteBatchForFeed(feed.id, DELETE_BATCH_SIZE)
+            if (removed > 0) yield()
+        } while (removed > 0)
         aliasDao.deleteForFeed(feed.id)
         feedDao.delete(feed.id)
+    }
+
+    /**
+     * Removes the automatically-created guide feed belonging to a provider.
+     *
+     * Provider deletion used to remove only its catalogue rows. That left the feed, aliases and
+     * programmes behind, so a backup provider could keep influencing guide matching long after it
+     * disappeared from Settings. Remove the guide side first; if source deletion is interrupted,
+     * [ensureFeeds] can safely recreate an empty feed on the next launch.
+     */
+    suspend fun removeProviderFeed(sourceId: Long) {
+        feedDao.forProvider(sourceId)?.let { removeFeed(it) }
     }
 
     /**
@@ -122,8 +140,23 @@ class EpgRepository(
                 )
             }
         }
+
+        // Built-in publishers occasionally rename a country file (for example US1 -> US2).
+        // Match shipped feeds by their stable display name first and migrate the URL in place.
+        // That preserves the user's enabled/disabled choice and the existing on-disk cache while
+        // ensuring the next refresh does not keep requesting a permanently retired URL.
+        val existingBuiltInsByName = feedDao.all()
+            .filter { it.builtIn }
+            .associateBy { it.name }
         for ((name, url) in BUILT_IN_FEEDS) {
-            if (feedDao.byUrl(url) == null) {
+            val existing = existingBuiltInsByName[name]
+            if (existing != null) {
+                if (existing.url != url) {
+                    feedDao.update(
+                        existing.copy(url = url, lastSyncMillis = 0L, lastResult = ""),
+                    )
+                }
+            } else if (feedDao.byUrl(url) == null) {
                 // Off by default: shipping a switched-on 20 MB download for a country the
                 // user may not live in would be rude. The EPG settings screen makes
                 // enabling one a single click.
@@ -145,7 +178,8 @@ class EpgRepository(
             var written = 0
 
             for (feed in feedDao.enabled()) {
-                if (!force && nowUtcMillis - feed.lastSyncMillis < REFRESH_INTERVAL_MILLIS) {
+                val cachedUntilMillis = programmeDao.latestEndForFeed(feed.id)
+                if (!shouldRefreshFeed(feed.lastSyncMillis, cachedUntilMillis, nowUtcMillis, force)) {
                     succeeded++
                     continue
                 }
@@ -347,11 +381,38 @@ class EpgRepository(
         /** Writes per transaction. Large enough to be fast, small enough not to hold WAL open. */
         const val BATCH_SIZE = 500
 
+        /** Rows removed per transaction so feed cleanup never monopolises the guide database. */
+        const val DELETE_BATCH_SIZE = 2_000
+
         /** Keep finished programmes for a day so "what was on" still works. */
         val RETENTION_PAST_MILLIS: Long = TimeUnit.DAYS.toMillis(1)
 
         /** Feeds publish rolling windows; refreshing more often than this is rude. */
         val REFRESH_INTERVAL_MILLIS: Long = TimeUnit.HOURS.toMillis(6)
+
+        /**
+         * Refresh early when the saved guide no longer covers the next scheduled refresh window.
+         * This makes the database a useful offline cache instead of allowing a recently-downloaded
+         * but unusually short XMLTV file to run dry before the six-hour worker wakes again.
+         */
+        val MIN_CACHED_FUTURE_MILLIS: Long = TimeUnit.HOURS.toMillis(6)
+
+        /** A short-coverage feed may be legitimate; do not re-download it on every app reopen. */
+        val LOW_COVERAGE_RETRY_MILLIS: Long = TimeUnit.HOURS.toMillis(1)
+
+        internal fun shouldRefreshFeed(
+            lastSyncMillis: Long,
+            cachedUntilMillis: Long?,
+            nowUtcMillis: Long,
+            force: Boolean,
+        ): Boolean {
+            if (force || lastSyncMillis <= 0L) return true
+            val ageMillis = (nowUtcMillis - lastSyncMillis).coerceAtLeast(0L)
+            if (ageMillis >= REFRESH_INTERVAL_MILLIS) return true
+            if (ageMillis < LOW_COVERAGE_RETRY_MILLIS) return false
+            return cachedUntilMillis == null ||
+                cachedUntilMillis < nowUtcMillis + MIN_CACHED_FUTURE_MILLIS
+        }
 
         /**
          * The curated built-in list. Criteria for being here: free, no key or signup,
@@ -381,9 +442,9 @@ class EpgRepository(
             "UK — epgshare01 (Sky lineup)" to
                 "https://epgshare01.online/epgshare01/epg_ripper_UK1.xml.gz",
             "USA — epgshare01" to
-                "https://epgshare01.online/epgshare01/epg_ripper_US1.xml.gz",
+                "https://epgshare01.online/epgshare01/epg_ripper_US2.xml.gz",
             "Canada — epgshare01" to
-                "https://epgshare01.online/epgshare01/epg_ripper_CA1.xml.gz",
+                "https://epgshare01.online/epgshare01/epg_ripper_CA2.xml.gz",
             "Australia — epgshare01" to
                 "https://epgshare01.online/epgshare01/epg_ripper_AU1.xml.gz",
         )
