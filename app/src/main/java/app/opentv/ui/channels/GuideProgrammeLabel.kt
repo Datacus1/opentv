@@ -31,10 +31,14 @@ internal fun guideProgrammeLabel(title: String, description: String?): GuideProg
 
 private fun extractMatchup(description: String): Pair<String, String>? {
     if (description.isBlank()) return null
-    FACE_OFF.find(description)?.let { return it.groupValues[1] to it.groupValues[2] }
-    TRAVEL_TO_TAKE_ON.find(description)?.let { return it.groupValues[1] to it.groupValues[2] }
-    MATCHUP_VERB.find(description)?.let { return it.groupValues[1] to it.groupValues[2] }
-    SIMPLE_VERSUS.find(description)?.let { return it.groupValues[1] to it.groupValues[2] }
+    // A period normally terminates the first matchup sentence, but the ranking abbreviation
+    // `No.` is not a sentence boundary. Normalise only `No.` immediately before a rank so a
+    // visitor such as "No. 21 Gators" is not truncated to the bogus fallback team `NO`.
+    val text = RANK_PERIOD.replace(description, "No ")
+    FACE_OFF.find(text)?.let { return it.groupValues[1] to it.groupValues[2] }
+    TRAVEL_TO_TAKE_ON.find(text)?.let { return it.groupValues[1] to it.groupValues[2] }
+    MATCHUP_VERB.find(text)?.let { return it.groupValues[1] to it.groupValues[2] }
+    SIMPLE_VERSUS.find(text)?.let { return it.groupValues[1] to it.groupValues[2] }
     return null
 }
 
@@ -97,6 +101,7 @@ private const val COLLEGE_FOOTBALL = "College Football"
 private val GENERIC_COLLEGE_FOOTBALL =
     Regex("^(?:live:\\s*)?(?:ncaa\\s+)?college football$", RegexOption.IGNORE_CASE)
 private val RANK = Regex("(?i)\\bNo\\.?\\s*(\\d{1,2})\\b")
+private val RANK_PERIOD = Regex("(?i)\\bNo\\.\\s*(?=\\d{1,2}\\b)")
 private val RECORD = Regex("\\(\\s*\\d+\\s*-\\s*\\d+\\s*\\)")
 private val LEADING_QUALIFIER = Regex(
     "(?i)^(?:the\\s+)?(?:(?:Big Ten|Big 12|ACC|SEC|AAC|SIAC|Ivy League|Mountain West)\\s+)?" +
@@ -173,7 +178,7 @@ private val TEAMS = listOf(
     team("MIA", "Miami", mascots = listOf("Hurricanes")),
     team("MICH", "Michigan", mascots = listOf("Wolverines")),
     team("MINN", "Minnesota", mascots = listOf("Golden Gophers")),
-    team("MISS", "Ole Miss", mascots = listOf("Rebels")),
+    team("OLE MISS", "Ole Miss", mascots = listOf("Rebels")),
     team("MIZ", "Missouri", mascots = listOf("Tigers")),
     team("MOST", "Missouri State", mascots = listOf("Bears")),
     team("MSST", "Mississippi State", mascots = listOf("Bulldogs")),

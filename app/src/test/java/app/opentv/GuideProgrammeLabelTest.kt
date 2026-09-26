@@ -23,6 +23,20 @@ class GuideProgrammeLabelTest {
     }
 
     @Test
+    fun `ranking period is not mistaken for the end of the visiting team`() {
+        val label = guideProgrammeLabel(
+            "College Football",
+            "The No. 4 Rebels (3-0) visit the No. 21 Gators (3-0) at Ben Hill Griffin Stadium. " +
+                "Ole Miss enters Week 4 after a win, while Florida remains unbeaten.",
+        )
+
+        assertThat(label.timelineText)
+            .isEqualTo("College Football\n#4 OLE MISS vs #21 FLA")
+        assertThat(label.singleLineText)
+            .isEqualTo("College Football · #4 OLE MISS vs #21 FLA")
+    }
+
+    @Test
     fun `live prefix is normalized while matchup remains`() {
         val label = guideProgrammeLabel(
             "Live: College Football",
