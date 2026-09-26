@@ -162,7 +162,8 @@ fun GuidePreview(
             val nowProg = row.now
             if (nowProg != null) {
                 Text(
-                    "${formatTime(nowProg.startUtcMillis)}–${formatTime(nowProg.endUtcMillis)}   ${nowProg.title}",
+                    "${formatTime(nowProg.startUtcMillis)}–${formatTime(nowProg.endUtcMillis)}   " +
+                        guideProgrammeLabel(nowProg.title, nowProg.description).singleLineText,
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,

@@ -552,7 +552,7 @@ private fun GuideRow(
                     val drawnWidth = maxOf(trueWidth, MIN_BLOCK_WIDTH)
                     debt += drawnWidth - trueWidth
                     ProgrammeBlock(
-                        title = programme.title,
+                        title = guideProgrammeLabel(programme.title, programme.description).timelineText,
                         width = drawnWidth,
                         isNow = isNow,
                         progress = if (isNow) programme.progressAt(nowMillis) else 0f,

@@ -14,8 +14,8 @@ android {
         applicationId = "app.opentv"
         minSdk = 23
         targetSdk = 35
-        versionCode = 44
-        versionName = "0.11.7-commercial-break.25-shield-cache-safety"
+        versionCode = 45
+        versionName = "0.11.7-commercial-break.26-college-matchups"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
