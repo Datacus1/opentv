@@ -63,7 +63,10 @@ private fun compactTeam(raw: String, description: String): String? {
         when {
             mascotCandidates.size == 1 -> mascotCandidates.single()
             mascotCandidates.size > 1 -> mascotCandidates
-                .filter { team -> team.names.any { description.containsPhrase(it) } }
+                .filter { team ->
+                    team.names.any { description.containsPhrase(it) } ||
+                        team.contextHints.any { description.containsPhrase(it) }
+                }
                 .singleOrNull()
             else -> null
         }
@@ -92,10 +95,16 @@ private data class TeamIdentity(
     val abbreviation: String,
     val names: List<String>,
     val mascots: List<String> = emptyList(),
+    /** Venue or roster clues used only to disambiguate a mascot in the full synopsis. */
+    val contextHints: List<String> = emptyList(),
 )
 
-private fun team(abbreviation: String, vararg names: String, mascots: List<String> = emptyList()) =
-    TeamIdentity(abbreviation, names.toList(), mascots)
+private fun team(
+    abbreviation: String,
+    vararg names: String,
+    mascots: List<String> = emptyList(),
+    contextHints: List<String> = emptyList(),
+) = TeamIdentity(abbreviation, names.toList(), mascots, contextHints)
 
 private const val COLLEGE_FOOTBALL = "College Football"
 private val GENERIC_COLLEGE_FOOTBALL =
@@ -149,8 +158,9 @@ private val TEAMS = listOf(
     team("BRWN", "Brown", mascots = listOf("Bears")),
     team("CAL", "California", "Cal", mascots = listOf("Golden Bears")),
     team("CIN", "Cincinnati", mascots = listOf("Bearcats")),
-    team("CLEM", "Clemson", mascots = listOf("Tigers")),
+    team("CLEM", "Clemson", mascots = listOf("Tigers"), contextHints = listOf("Tait Reynolds")),
     team("CMU", "Central Michigan", mascots = listOf("Chippewas")),
+    team("CCU", "Coastal Carolina", mascots = listOf("Chanticleers")),
     team("COLO", "Colorado", mascots = listOf("Buffaloes")),
     team("CSU", "Colorado State", mascots = listOf("Rams")),
     team("DEL", "Delaware", mascots = listOf("Blue Hens")),
@@ -175,6 +185,7 @@ private val TEAMS = listOf(
     team("LOU", "Louisville", mascots = listOf("Cardinals")),
     team("LSU", "LSU", "Louisiana State", mascots = listOf("Tigers")),
     team("MD", "Maryland", mascots = listOf("Terrapins")),
+    team("MER", "Mercer", mascots = listOf("Bears")),
     team("MIA", "Miami", mascots = listOf("Hurricanes")),
     team("MICH", "Michigan", mascots = listOf("Wolverines")),
     team("MINN", "Minnesota", mascots = listOf("Golden Gophers")),
@@ -189,13 +200,18 @@ private val TEAMS = listOf(
     team("NCSU", "NC State", "North Carolina State", mascots = listOf("Wolfpack")),
     team("NEB", "Nebraska", mascots = listOf("Cornhuskers")),
     team("NEV", "Nevada", mascots = listOf("Wolf Pack")),
-    team("NMSU", "New Mexico State", mascots = listOf("Aggies")),
+    team(
+        "NMSU",
+        "New Mexico State",
+        mascots = listOf("Aggies"),
+        contextHints = listOf("Aggie Memorial Stadium"),
+    ),
     team("NW", "Northwestern", mascots = listOf("Wildcats")),
     team("OSU", "Ohio State", mascots = listOf("Buckeyes")),
     team("OKST", "Oklahoma State", mascots = listOf("Cowboys")),
     team("OU", "Oklahoma", mascots = listOf("Sooners")),
     team("ORE", "Oregon", mascots = listOf("Ducks")),
-    team("RICE", "Rice", mascots = listOf("Owls")),
+    team("RICE", "Rice", mascots = listOf("Owls"), contextHints = listOf("Jacurri Brown")),
     team("RUTG", "Rutgers", mascots = listOf("Scarlet Knights")),
     team("SC", "South Carolina", mascots = listOf("Gamecocks")),
     team("SDSU", "San Diego State", mascots = listOf("Aztecs")),
