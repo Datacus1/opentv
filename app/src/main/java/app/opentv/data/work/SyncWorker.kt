@@ -85,6 +85,7 @@ class SyncWorker(
                 .setConstraints(
                     Constraints.Builder()
                         .setRequiredNetworkType(NetworkType.CONNECTED)
+                        .setRequiresStorageNotLow(true)
                         .build(),
                 )
                 .build()
@@ -100,6 +101,7 @@ class SyncWorker(
                 .setConstraints(
                     Constraints.Builder()
                         .setRequiredNetworkType(NetworkType.CONNECTED)
+                        .setRequiresStorageNotLow(true)
                         .build(),
                 )
                 .setBackoffCriteria(

@@ -18,7 +18,10 @@ class EpgCachePolicyTest {
         assertThat(
             EpgRepository.shouldRefreshFeed(
                 lastSyncMillis = now - TimeUnit.MINUTES.toMillis(90),
-                cachedUntilMillis = now + TimeUnit.HOURS.toMillis(12),
+                lastAttemptMillis = now - TimeUnit.MINUTES.toMillis(90),
+                failureCount = 0,
+                populatedChannels = 100,
+                coveredChannels = 90,
                 nowUtcMillis = now,
                 force = false,
             ),
@@ -30,7 +33,10 @@ class EpgCachePolicyTest {
         assertThat(
             EpgRepository.shouldRefreshFeed(
                 lastSyncMillis = now - TimeUnit.HOURS.toMillis(2),
-                cachedUntilMillis = now + TimeUnit.HOURS.toMillis(2),
+                lastAttemptMillis = now - TimeUnit.HOURS.toMillis(2),
+                failureCount = 0,
+                populatedChannels = 100,
+                coveredChannels = 20,
                 nowUtcMillis = now,
                 force = false,
             ),
@@ -42,7 +48,10 @@ class EpgCachePolicyTest {
         assertThat(
             EpgRepository.shouldRefreshFeed(
                 lastSyncMillis = now - TimeUnit.MINUTES.toMillis(20),
-                cachedUntilMillis = now + TimeUnit.HOURS.toMillis(2),
+                lastAttemptMillis = now - TimeUnit.MINUTES.toMillis(20),
+                failureCount = 0,
+                populatedChannels = 100,
+                coveredChannels = 20,
                 nowUtcMillis = now,
                 force = false,
             ),
@@ -51,15 +60,59 @@ class EpgCachePolicyTest {
 
     @Test
     fun `never synced expired and forced feeds refresh`() {
-        assertThat(EpgRepository.shouldRefreshFeed(0L, null, now, false)).isTrue()
+        assertThat(EpgRepository.shouldRefreshFeed(0L, 0L, 0, 0, 0, now, false)).isTrue()
         assertThat(
             EpgRepository.shouldRefreshFeed(
                 lastSyncMillis = now - TimeUnit.HOURS.toMillis(7),
-                cachedUntilMillis = now + TimeUnit.DAYS.toMillis(2),
+                lastAttemptMillis = now - TimeUnit.HOURS.toMillis(7),
+                failureCount = 0,
+                populatedChannels = 100,
+                coveredChannels = 100,
                 nowUtcMillis = now,
                 force = false,
             ),
         ).isTrue()
-        assertThat(EpgRepository.shouldRefreshFeed(now, now + 1L, now, true)).isTrue()
+        assertThat(EpgRepository.shouldRefreshFeed(now, now, 0, 100, 100, now, true)).isTrue()
+    }
+
+    @Test
+    fun `single far future outlier cannot hide broad coverage failure`() {
+        assertThat(
+            EpgRepository.shouldRefreshFeed(
+                lastSyncMillis = now - TimeUnit.HOURS.toMillis(2),
+                lastAttemptMillis = now - TimeUnit.HOURS.toMillis(2),
+                failureCount = 0,
+                populatedChannels = 500,
+                coveredChannels = 1,
+                nowUtcMillis = now,
+                force = false,
+            ),
+        ).isTrue()
+    }
+
+    @Test
+    fun `failed feed observes exponential retry backoff`() {
+        assertThat(
+            EpgRepository.shouldRefreshFeed(
+                lastSyncMillis = 0L,
+                lastAttemptMillis = now - TimeUnit.MINUTES.toMillis(30),
+                failureCount = 2,
+                populatedChannels = 0,
+                coveredChannels = 0,
+                nowUtcMillis = now,
+                force = false,
+            ),
+        ).isFalse()
+        assertThat(
+            EpgRepository.shouldRefreshFeed(
+                lastSyncMillis = 0L,
+                lastAttemptMillis = now - TimeUnit.HOURS.toMillis(2),
+                failureCount = 2,
+                populatedChannels = 0,
+                coveredChannels = 0,
+                nowUtcMillis = now,
+                force = false,
+            ),
+        ).isTrue()
     }
 }

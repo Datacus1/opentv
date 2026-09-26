@@ -110,6 +110,8 @@ object ServiceLocator {
 
         val epgRepository: EpgRepository by lazy {
             EpgRepository(
+                context = appContext,
+                database = database,
                 programmeDao = database.programmes(),
                 feedDao = database.epgFeeds(),
                 aliasDao = database.epgAliases(),
@@ -117,6 +119,9 @@ object ServiceLocator {
                 sourceDao = database.sources(),
                 api = xtreamApi,
                 http = httpClient,
+                maintenanceAllowed = {
+                    !LivePlaybackSession.isActive() && database.recordings().active().isEmpty()
+                },
             )
         }
 

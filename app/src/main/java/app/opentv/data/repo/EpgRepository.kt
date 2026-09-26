@@ -5,10 +5,13 @@
  */
 package app.opentv.data.repo
 
+import android.content.Context
+import android.os.StatFs
 import android.util.Log
 import app.opentv.data.db.ChannelDao
 import app.opentv.data.db.EpgChannelAliasDao
 import app.opentv.data.db.EpgFeedDao
+import app.opentv.data.db.OpenTvDatabase
 import app.opentv.data.db.ProgrammeDao
 import app.opentv.data.db.SourceDao
 import app.opentv.data.model.EpgChannelAlias
@@ -19,44 +22,32 @@ import app.opentv.data.parser.ChannelNameNormalizer
 import app.opentv.data.parser.XmltvParser
 import app.opentv.data.remote.XtreamApi
 import java.io.BufferedInputStream
+import java.io.File
 import java.io.InputStream
 import java.util.concurrent.TimeUnit
 import java.util.zip.GZIPInputStream
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.yield
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
 /**
- * Owns the electronic programme guide, end to end: feeds in, matched channels out.
+ * Owns the electronic programme guide, with a cache policy sized for small Android TV storage.
  *
- * ## The feed model
- *
- * Guide data can come from three places at once — the provider's own XMLTV (usually thin or
- * empty), the curated free sources shipped with the app, and URLs the user adds. Each is an
- * [EpgFeed] row; every enabled feed is downloaded and merged into one guide. After a sync,
- * [EpgMatcher] joins provider channels to guide channels by normalised name, which is what
- * makes a free national guide light up channels named `UK| BBC ONE FHD`.
- *
- * ## The failure this class exists to prevent
- *
- * The standard way to refresh an EPG is: delete everything, download the new XMLTV, insert
- * it. It is simple and it is why so many IPTV players lose their guide — one stalled
- * download and the user is left with nothing, plus advice to reinstall.
- *
- * OpenTV never deletes before it has the replacement:
- *
- * - Programmes are **upserted in batches** as they stream out of the parser. The unique index
- *   on `(feedId, epgChannelId, startUtcMillis)` makes a re-run idempotent, so a sync that
- *   dies at 60% leaves 60% of a fresher guide behind — strictly better than before.
- * - Old programmes are pruned **by age**, only after at least one feed succeeds.
- * - A failed feed leaves that feed's previous data intact and records the reason on the
- *   feed row, where the settings screen shows it — no silent failure.
+ * The working cache always remains readable while a replacement streams in. A failed download
+ * never clears it. Successful refreshes update programmes by their natural XMLTV identity
+ * (feed/channel/start), then reconcile stale rows in bounded transactions. Every ingestion and
+ * deletion path observes a protected free-space reserve; no single SQL statement is allowed to
+ * delete an unbounded number of rows.
  */
 class EpgRepository(
+    private val context: Context,
+    private val database: OpenTvDatabase,
     private val programmeDao: ProgrammeDao,
     private val feedDao: EpgFeedDao,
     private val aliasDao: EpgChannelAliasDao,
@@ -64,6 +55,8 @@ class EpgRepository(
     private val sourceDao: SourceDao,
     private val api: XtreamApi,
     private val http: OkHttpClient,
+    /** False while live playback or recording makes storage maintenance undesirable. */
+    private val maintenanceAllowed: suspend () -> Boolean = { true },
 ) {
 
     data class SyncSummary(
@@ -73,6 +66,32 @@ class EpgRepository(
         val channelsMatched: Int,
         val channelsTotal: Int,
     )
+
+    data class StorageDiagnostics(
+        val freeBytes: Long,
+        val databaseBytes: Long,
+        val walBytes: Long,
+        val programmeRows: Int,
+    )
+
+    private data class FeedCoverage(val populatedChannels: Int, val coveredChannels: Int)
+
+    private sealed interface FeedResult {
+        data class Success(
+            val programmes: Int,
+            val channels: Int,
+            val truncated: Boolean,
+        ) : FeedResult
+
+        data class Failed(val reason: String) : FeedResult
+    }
+
+    private class StorageReserveException(message: String) : IllegalStateException(message)
+
+    /** One repository instance owns every guide mutation, so sync and deletion cannot interleave. */
+    private val mutationMutex = Mutex()
+    private val databaseFile: File = context.getDatabasePath(DATABASE_NAME)
+    private val walFile: File = File(databaseFile.path + "-wal")
 
     // ---- Reads -----------------------------------------------------------------------------
 
@@ -87,50 +106,63 @@ class EpgRepository(
     suspend fun upcoming(epgChannelId: String, nowUtcMillis: Long, limit: Int = 12): List<Programme> =
         programmeDao.upcoming(epgChannelId, nowUtcMillis, limit)
 
-    // ---- Feed management -------------------------------------------------------------------
-
-    suspend fun addCustomFeed(name: String, url: String) {
-        val trimmed = url.trim()
-        if (trimmed.isEmpty() || feedDao.byUrl(trimmed) != null) return
-        feedDao.insert(
-            EpgFeed(name = name.trim().ifBlank { trimmed }, url = trimmed, enabled = true),
+    suspend fun storageDiagnostics(): StorageDiagnostics = withContext(Dispatchers.IO) {
+        StorageDiagnostics(
+            freeBytes = availableBytes(),
+            databaseBytes = databaseFile.length(),
+            walBytes = walFile.length(),
+            programmeRows = programmeDao.countAll(),
         )
     }
 
-    suspend fun setFeedEnabled(id: Long, enabled: Boolean) = feedDao.setEnabled(id, enabled)
+    // ---- Feed management -------------------------------------------------------------------
 
-    suspend fun removeFeed(feed: EpgFeed) {
-        // A removed feed takes its guide data with it — orphaned programmes would otherwise
-        // keep matching channels forever with content that never refreshes. Work in bounded
-        // transactions: one giant DELETE can monopolise Room's writer for minutes when a feed has
-        // a very large cache, starving the guide's normal read query and freezing the UI.
-        do {
-            val removed = programmeDao.deleteBatchForFeed(feed.id, DELETE_BATCH_SIZE)
-            if (removed > 0) yield()
-        } while (removed > 0)
-        aliasDao.deleteForFeed(feed.id)
-        feedDao.delete(feed.id)
+    suspend fun addCustomFeed(name: String, url: String) = withContext(Dispatchers.IO) {
+        mutationMutex.withLock {
+            val trimmed = url.trim().take(MAX_URL_CHARS)
+            if (trimmed.isEmpty() || feedDao.byUrl(trimmed) != null) return@withLock
+            feedDao.insert(
+                EpgFeed(
+                    name = name.trim().ifBlank { trimmed }.take(MAX_TITLE_CHARS),
+                    url = trimmed,
+                    enabled = true,
+                ),
+            )
+        }
     }
 
-    /**
-     * Removes the automatically-created guide feed belonging to a provider.
-     *
-     * Provider deletion used to remove only its catalogue rows. That left the feed, aliases and
-     * programmes behind, so a backup provider could keep influencing guide matching long after it
-     * disappeared from Settings. Remove the guide side first; if source deletion is interrupted,
-     * [ensureFeeds] can safely recreate an empty feed on the next launch.
-     */
-    suspend fun removeProviderFeed(sourceId: Long) {
-        feedDao.forProvider(sourceId)?.let { removeFeed(it) }
+    suspend fun setFeedEnabled(id: Long, enabled: Boolean) = withContext(Dispatchers.IO) {
+        mutationMutex.withLock { feedDao.setEnabled(id, enabled) }
     }
 
-    /**
-     * Makes sure the standing feed rows exist: one per provider source, plus the curated
-     * built-in list. Insert-if-absent, so user toggles survive every call.
-     */
-    suspend fun ensureFeeds() {
+    /** Persist the tombstone first; bounded cleanup can safely resume after cancellation/reboot. */
+    suspend fun removeFeed(feed: EpgFeed) = withContext(Dispatchers.IO) {
+        mutationMutex.withLock {
+            feedDao.markDeleting(feed.id)
+            cleanupDeletedFeedLocked(feed.id)
+        }
+    }
+
+    suspend fun removeProviderFeed(sourceId: Long) = withContext(Dispatchers.IO) {
+        mutationMutex.withLock {
+            feedDao.forProvider(sourceId)?.let { feed ->
+                feedDao.markDeleting(feed.id)
+                cleanupDeletedFeedLocked(feed.id)
+            }
+        }
+    }
+
+    suspend fun ensureFeeds() = withContext(Dispatchers.IO) {
+        mutationMutex.withLock {
+            resumePendingDeletionsLocked()
+            ensureFeedsLocked()
+        }
+    }
+
+    private suspend fun ensureFeedsLocked() {
+        val existing = feedDao.all()
         for (source in sourceDao.enabled()) {
-            if (feedDao.forProvider(source.id) == null) {
+            if (existing.none { it.providerSourceId == source.id }) {
                 feedDao.insert(
                     EpgFeed(
                         name = "${source.name} (provider guide)",
@@ -141,142 +173,326 @@ class EpgRepository(
             }
         }
 
-        // Built-in publishers occasionally rename a country file (for example US1 -> US2).
-        // Match shipped feeds by their stable display name first and migrate the URL in place.
-        // That preserves the user's enabled/disabled choice and the existing on-disk cache while
-        // ensuring the next refresh does not keep requesting a permanently retired URL.
-        val existingBuiltInsByName = feedDao.all()
-            .filter { it.builtIn }
-            .associateBy { it.name }
+        // Publishers rename country files occasionally. Stable-name migration preserves the cache
+        // and user toggle; the next complete successful refresh reconciles old rows and aliases.
+        val builtInsByName = feedDao.all().filter { it.builtIn }.associateBy { it.name }
         for ((name, url) in BUILT_IN_FEEDS) {
-            val existing = existingBuiltInsByName[name]
-            if (existing != null) {
-                if (existing.url != url) {
+            val saved = builtInsByName[name]
+            if (saved != null) {
+                if (!saved.deleting && saved.url != url) {
                     feedDao.update(
-                        existing.copy(url = url, lastSyncMillis = 0L, lastResult = ""),
+                        saved.copy(
+                            url = url,
+                            lastSyncMillis = 0L,
+                            lastAttemptMillis = 0L,
+                            failureCount = 0,
+                            lastResult = "",
+                        ),
                     )
                 }
             } else if (feedDao.byUrl(url) == null) {
-                // Off by default: shipping a switched-on 20 MB download for a country the
-                // user may not live in would be rude. The EPG settings screen makes
-                // enabling one a single click.
                 feedDao.insert(EpgFeed(name = name, url = url, builtIn = true, enabled = false))
             }
         }
     }
 
+    private suspend fun resumePendingDeletionsLocked() {
+        if (!maintenanceAllowed() || availableBytes() < SOFT_FREE_RESERVE_BYTES) return
+        for (feed in feedDao.pendingDeletion()) {
+            if (!cleanupDeletedFeedLocked(feed.id)) return
+        }
+    }
+
+    /** Returns true only when all programme and alias rows plus the feed row are gone. */
+    private suspend fun cleanupDeletedFeedLocked(feedId: Long): Boolean {
+        if (!maintenanceAllowed() || availableBytes() < SOFT_FREE_RESERVE_BYTES) return false
+        while (true) {
+            if (!maintenanceAllowed() || availableBytes() < HARD_FREE_FLOOR_BYTES) return false
+            val removed = programmeDao.deleteBatchForFeed(feedId, DELETE_BATCH_SIZE)
+            if (removed == 0) break
+            checkpointIfWalLarge()
+            yield()
+        }
+        aliasDao.deleteForFeed(feedId)
+        feedDao.delete(feedId)
+        return true
+    }
+
     // ---- Sync ------------------------------------------------------------------------------
 
-    /** Downloads every enabled feed, merges, prunes, and re-runs the matcher. */
     suspend fun syncAll(nowUtcMillis: Long, force: Boolean = false): SyncSummary =
         withContext(Dispatchers.IO) {
-            ensureFeeds()
-            maybeAutoEnableRegionalFeed()
+            mutationMutex.withLock {
+                resumePendingDeletionsLocked()
+                ensureFeedsLocked()
+                maybeAutoEnableRegionalFeedLocked()
 
-            var succeeded = 0
-            var failed = 0
-            var written = 0
+                var succeeded = 0
+                var failed = 0
+                var written = 0
 
-            for (feed in feedDao.enabled()) {
-                val cachedUntilMillis = programmeDao.latestEndForFeed(feed.id)
-                if (!shouldRefreshFeed(feed.lastSyncMillis, cachedUntilMillis, nowUtcMillis, force)) {
-                    succeeded++
-                    continue
-                }
-                when (val result = syncFeed(feed, nowUtcMillis)) {
-                    is FeedResult.Success -> {
-                        succeeded++
-                        written += result.programmes
-                        feedDao.markSynced(
-                            feed.id,
-                            nowUtcMillis,
-                            "${result.programmes} programmes, ${result.channels} channels",
+                for (feed in feedDao.enabled()) {
+                    val coverage = coverageFor(feed.id, nowUtcMillis)
+                    if (
+                        !shouldRefreshFeed(
+                            lastSyncMillis = feed.lastSyncMillis,
+                            lastAttemptMillis = feed.lastAttemptMillis,
+                            failureCount = feed.failureCount,
+                            populatedChannels = coverage.populatedChannels,
+                            coveredChannels = coverage.coveredChannels,
+                            nowUtcMillis = nowUtcMillis,
+                            force = force,
                         )
+                    ) {
+                        succeeded++
+                        continue
                     }
-                    is FeedResult.Failed -> {
+
+                    if (availableBytes() < SOFT_FREE_RESERVE_BYTES) {
+                        val reason = "Refresh deferred to protect the Shield's storage reserve."
+                        feedDao.markFailed(feed.id, nowUtcMillis, reason)
+                        Log.w(TAG, "Feed '${feed.name}' deferred: low free space")
                         failed++
-                        // The stamp is NOT advanced on failure, so the next sync retries
-                        // rather than waiting out the interval on a feed that never landed.
-                        feedDao.markSynced(feed.id, feed.lastSyncMillis, result.reason)
-                        Log.w(TAG, "Feed '${feed.name}' failed: ${result.reason}")
+                        continue
+                    }
+
+                    when (val result = syncFeed(feed, nowUtcMillis)) {
+                        is FeedResult.Success -> {
+                            succeeded++
+                            written += result.programmes
+                            val suffix = if (result.truncated) " (storage-safe limit reached)" else ""
+                            feedDao.markSucceeded(
+                                feed.id,
+                                nowUtcMillis,
+                                "${result.programmes} programmes, ${result.channels} channels$suffix",
+                            )
+
+                            // Only a complete parse proves which old rows disappeared upstream.
+                            if (!result.truncated && maintenanceAllowed()) {
+                                deleteInBatches {
+                                    programmeDao.deleteStaleBatchForFeed(
+                                        feed.id,
+                                        nowUtcMillis,
+                                        DELETE_BATCH_SIZE,
+                                    )
+                                }
+                            }
+                        }
+
+                        is FeedResult.Failed -> {
+                            failed++
+                            feedDao.markFailed(feed.id, nowUtcMillis, result.reason)
+                            Log.w(TAG, "Feed '${feed.name}' failed: ${result.reason}")
+                        }
                     }
                 }
-            }
 
-            if (succeeded > 0) {
-                programmeDao.deleteEndedBefore(nowUtcMillis - RETENTION_PAST_MILLIS)
+                runBoundedRetentionLocked(nowUtcMillis)
+                val (matched, total) = runMatcherLocked()
+                truncateWalWhenIdle()
+                logStorageState()
+                SyncSummary(succeeded, failed, written, matched, total)
             }
-
-            val (matched, total) = runMatcher()
-            SyncSummary(succeeded, failed, written, matched, total)
         }
 
-    private sealed interface FeedResult {
-        data class Success(val programmes: Int, val channels: Int) : FeedResult
-        data class Failed(val reason: String) : FeedResult
+    private suspend fun coverageFor(feedId: Long, nowUtcMillis: Long): FeedCoverage {
+        val populated = programmeDao.populatedChannelsForFeed(
+            feedId,
+            nowUtcMillis,
+            nowUtcMillis + RETENTION_FUTURE_MILLIS,
+        )
+        val covered = programmeDao.channelsCovering(
+            feedId,
+            nowUtcMillis + MIN_CACHED_FUTURE_MILLIS,
+        )
+        return FeedCoverage(populated, covered)
     }
 
     private suspend fun syncFeed(feed: EpgFeed, nowUtcMillis: Long): FeedResult {
         val batch = ArrayList<Programme>(BATCH_SIZE)
-        val aliases = ArrayList<EpgChannelAlias>(256)
+        val aliases = LinkedHashMap<String, EpgChannelAlias>(512)
         var written = 0
+        var accepted = 0
+        var truncated = false
+        val oldestAllowed = nowUtcMillis - RETENTION_PAST_MILLIS
+        val newestAllowed = nowUtcMillis + RETENTION_FUTURE_MILLIS
 
-        try {
+        return try {
             openFeedStream(feed).use { stream ->
                 val stats = XmltvParser.parse(
                     input = stream,
                     feedId = feed.id,
-                    onChannelAlias = { id, displayName ->
-                        aliases += EpgChannelAlias(
-                            feedId = feed.id,
-                            epgId = id,
-                            displayName = displayName ?: id,
-                            normalizedKey = ChannelNameNormalizer.normalize(displayName ?: id).groupKey,
-                        )
+                    onChannelAlias = { rawId, rawDisplayName ->
+                        val id = rawId.take(MAX_EPG_ID_CHARS)
+                        if (aliases.size >= MAX_ALIASES_PER_FEED && id !in aliases) {
+                            truncated = true
+                        } else {
+                            val displayName = (rawDisplayName ?: id).take(MAX_TITLE_CHARS)
+                            aliases[id] = EpgChannelAlias(
+                                feedId = feed.id,
+                                epgId = id,
+                                displayName = displayName,
+                                normalizedKey = ChannelNameNormalizer.normalize(displayName).groupKey,
+                            )
+                        }
                     },
-                    onProgramme = { programme ->
-                        // Skip anything that finished before the retention cut-off; no point
-                        // writing rows we are about to prune.
-                        if (programme.endUtcMillis >= nowUtcMillis - RETENTION_PAST_MILLIS) {
-                            batch += programme
-                            if (batch.size >= BATCH_SIZE) {
-                                programmeDao.upsertAll(batch)
-                                written += batch.size
-                                batch.clear()
-                            }
+                    onProgramme = { raw ->
+                        if (raw.endUtcMillis < oldestAllowed || raw.startUtcMillis > newestAllowed) {
+                            return@parse
+                        }
+                        if (accepted >= MAX_PROGRAMMES_PER_FEED) {
+                            truncated = true
+                            return@parse
+                        }
+                        batch += sanitizeProgramme(raw, nowUtcMillis)
+                        accepted++
+                        if (batch.size >= BATCH_SIZE) {
+                            // StatFs is intentionally checked once per transaction rather than
+                            // once per programme; a large XMLTV file can contain hundreds of
+                            // thousands of entries and filesystem calls in the parser hot path
+                            // noticeably delay the guide becoming usable.
+                            ensureHardWriteReserve()
+                            programmeDao.upsertAll(batch)
+                            written += batch.size
+                            batch.clear()
+                            checkpointIfWalLarge()
+                            yield()
                         }
                     },
                 )
+
                 if (batch.isNotEmpty()) {
+                    ensureHardWriteReserve()
                     programmeDao.upsertAll(batch)
                     written += batch.size
-                }
-                if (aliases.isNotEmpty()) {
-                    aliases.chunked(BATCH_SIZE).forEach { aliasDao.upsertAll(it) }
+                    batch.clear()
+                    checkpointIfWalLarge()
                 }
 
-                if (written == 0 && stats.programmeCount == 0) {
-                    return FeedResult.Failed("Downloaded, but contained no programmes.")
+                if (written == 0) {
+                    return FeedResult.Failed(
+                        if (stats.programmeCount == 0) {
+                            "Downloaded, but contained no programmes."
+                        } else {
+                            "Downloaded, but contained no programmes in the usable guide window."
+                        },
+                    )
                 }
-                return FeedResult.Success(written, stats.channelCount)
+
+                // Aliases are small enough to replace atomically, and only after the XML completed.
+                if (aliases.isNotEmpty()) aliasDao.replaceForFeed(feed.id, aliases.values.toList())
+                FeedResult.Success(written, stats.channelCount, truncated)
             }
         } catch (e: CancellationException) {
             throw e
+        } catch (e: StorageReserveException) {
+            FeedResult.Failed(e.message ?: "Refresh stopped to protect free storage.")
         } catch (e: Exception) {
-            // Deliberately no cleanup. Whatever was written is newer than what was there,
-            // and what was there is still there.
-            return FeedResult.Failed(e.message ?: "Download failed.")
+            // No cleanup here: the last complete cache is still present. A later complete refresh
+            // reconciles any partial newer rows through lastSeenSyncMillis.
+            FeedResult.Failed(e.message ?: "Download failed.")
         }
     }
 
-    /**
-     * Opens a feed as a decompressed XML stream.
-     *
-     * Several of the free guide sources publish `.gz` files (a national guide compresses
-     * roughly 10:1), and providers occasionally gzip xmltv.php without saying so. Sniffing
-     * the first two bytes for the gzip magic number handles both, regardless of what the
-     * URL or the headers claim.
-     */
+    private fun sanitizeProgramme(programme: Programme, syncMillis: Long): Programme =
+        programme.copy(
+            epgChannelId = programme.epgChannelId.take(MAX_EPG_ID_CHARS),
+            title = programme.title.take(MAX_TITLE_CHARS),
+            description = programme.description?.take(MAX_DESCRIPTION_CHARS),
+            category = programme.category?.take(MAX_CATEGORY_CHARS),
+            iconUrl = programme.iconUrl?.take(MAX_URL_CHARS),
+            lastSeenSyncMillis = syncMillis,
+        )
+
+    private suspend fun runBoundedRetentionLocked(nowUtcMillis: Long) {
+        if (!maintenanceAllowed() || availableBytes() < SOFT_FREE_RESERVE_BYTES) return
+        deleteInBatches {
+            programmeDao.deleteExpiredBatch(
+                nowUtcMillis - RETENTION_PAST_MILLIS,
+                DELETE_BATCH_SIZE,
+            )
+        }
+        deleteInBatches {
+            programmeDao.deleteTooFarFutureBatch(
+                nowUtcMillis + RETENTION_FUTURE_MILLIS,
+                DELETE_BATCH_SIZE,
+            )
+        }
+        for (feed in feedDao.all().filterNot { it.deleting }) {
+            deleteFeedOverflowLocked(feed.id)
+        }
+        deleteGlobalOverflowLocked()
+    }
+
+    private suspend fun deleteFeedOverflowLocked(feedId: Long) {
+        while (maintenanceAllowed() && availableBytes() >= HARD_FREE_FLOOR_BYTES) {
+            val excess = programmeDao.countForFeed(feedId) - MAX_PROGRAMMES_PER_FEED
+            if (excess <= 0) return
+            programmeDao.deleteFarthestFutureBatchForFeed(feedId, minOf(excess, DELETE_BATCH_SIZE))
+            checkpointIfWalLarge()
+            yield()
+        }
+    }
+
+    private suspend fun deleteGlobalOverflowLocked() {
+        while (maintenanceAllowed() && availableBytes() >= HARD_FREE_FLOOR_BYTES) {
+            val excess = programmeDao.countAll() - MAX_PROGRAMMES_TOTAL
+            if (excess <= 0) return
+            programmeDao.deleteFarthestFutureBatch(minOf(excess, DELETE_BATCH_SIZE))
+            checkpointIfWalLarge()
+            yield()
+        }
+    }
+
+    private suspend fun deleteInBatches(delete: suspend () -> Int) {
+        while (maintenanceAllowed() && availableBytes() >= HARD_FREE_FLOOR_BYTES) {
+            val removed = delete()
+            if (removed == 0) return
+            checkpointIfWalLarge()
+            yield()
+        }
+    }
+
+    private suspend fun ensureHardWriteReserve() {
+        if (availableBytes() < HARD_FREE_FLOOR_BYTES) {
+            throw StorageReserveException("Refresh stopped to preserve 1.10 GiB of free storage.")
+        }
+    }
+
+    private fun availableBytes(): Long = runCatching {
+        StatFs(context.dataDir.absolutePath).availableBytes
+    }.getOrDefault(Long.MAX_VALUE)
+
+    private fun checkpointIfWalLarge() {
+        if (walFile.length() < WAL_CHECKPOINT_BYTES) return
+        runCatching { checkpoint("PASSIVE") }
+            .onFailure { Log.w(TAG, "Passive WAL checkpoint failed", it) }
+    }
+
+    private suspend fun truncateWalWhenIdle() {
+        if (
+            walFile.length() < WAL_CHECKPOINT_BYTES ||
+            !maintenanceAllowed() ||
+            availableBytes() < SOFT_FREE_RESERVE_BYTES
+        ) return
+        runCatching { checkpoint("TRUNCATE") }
+            .onFailure { Log.w(TAG, "Idle WAL truncation failed", it) }
+    }
+
+    private fun checkpoint(mode: String) {
+        database.openHelper.writableDatabase
+            .query("PRAGMA wal_checkpoint($mode)")
+            .use { cursor -> while (cursor.moveToNext()) Unit }
+    }
+
+    private suspend fun logStorageState() {
+        Log.i(
+            TAG,
+            "Storage: free=${availableBytes()} db=${databaseFile.length()} wal=${walFile.length()} " +
+                "programmes=${programmeDao.countAll()}",
+        )
+    }
+
     private suspend fun openFeedStream(feed: EpgFeed): InputStream {
         val raw: InputStream = when {
             feed.providerSourceId != null -> {
@@ -284,6 +500,7 @@ class EpgRepository(
                     ?: throw IllegalStateException("Provider for this guide no longer exists.")
                 api.openEpgStream(source)
             }
+
             feed.url != null -> {
                 val response = http.newCall(Request.Builder().url(feed.url).build()).execute()
                 if (!response.isSuccessful) {
@@ -293,6 +510,7 @@ class EpgRepository(
                 response.body?.byteStream()
                     ?: throw IllegalStateException("The server returned an empty guide.")
             }
+
             else -> throw IllegalStateException("Feed has no URL and no provider.")
         }
 
@@ -306,34 +524,30 @@ class EpgRepository(
 
     // ---- Matching --------------------------------------------------------------------------
 
-    /**
-     * Joins every channel to the merged guide by normalised name.
-     * Returns (channels with a working guide id, total channels).
-     */
-    suspend fun runMatcher(): Pair<Int, Int> {
-        val aliases = aliasDao.all()
-        val index = EpgMatcher.buildIndex(aliases.map { it.epgId to it.displayName })
-        // Only ids that actually have programmes count as "working" — a match against a
-        // channel the guide lists but never fills is a guide that looks broken.
-        val populated = programmeDao.channelIdsWithProgrammes().toHashSet()
+    suspend fun runMatcher(): Pair<Int, Int> = withContext(Dispatchers.IO) {
+        mutationMutex.withLock { runMatcherLocked() }
+    }
 
+    private suspend fun runMatcherLocked(): Pair<Int, Int> {
+        val aliases = aliasDao.allFromEnabledFeeds()
+        val index = EpgMatcher.buildIndex(aliases.map { it.epgId to it.displayName })
+        val populated = programmeDao.channelIdsWithProgrammesFromEnabledFeeds().toHashSet()
         val channels = channelDao.allForMatching()
         var matched = 0
 
         for (channel in channels) {
             val newMatch = index.match(channel.groupKey)
-            if (newMatch != channel.matchedEpgId) {
-                channelDao.setMatchedEpgId(channel.id, newMatch)
-            }
-            val works = channel.epgCandidates.any { it in populated } ||
+            if (newMatch != channel.matchedEpgId) channelDao.setMatchedEpgId(channel.id, newMatch)
+            if (
+                channel.epgCandidates.any { it in populated } ||
                 (newMatch != null && newMatch in populated)
-            if (works) matched++
+            ) matched++
         }
 
         Log.i(
             TAG,
             "Matcher: $matched of ${channels.size} channels have a working guide " +
-                "(${aliases.size} guide aliases, ${populated.size} populated guide channels)",
+                "(${aliases.size} enabled guide aliases, ${populated.size} populated channels)",
         )
         return matched to channels.size
     }
@@ -341,20 +555,8 @@ class EpgRepository(
     suspend fun setManualOverride(channelId: Long, epgId: String?) =
         channelDao.setEpgOverride(channelId, epgId)
 
-    /**
-     * Turns on the free guide for the user's region, once, on a pristine install.
-     *
-     * The reasoning: a provider guide is usually empty, and "go and find Guide settings"
-     * is a hurdle most people meet as a blank guide and give up on. The app already knows
-     * the region — the normaliser reads it off the `UK|` prefixes the provider itself
-     * ships — so when a clear majority of channels agree, enable that region's built-in.
-     *
-     * Guard rails: only when every built-in is untouched (never enabled, never synced)
-     * and no custom feed exists. Switch it off and it stays off — a choice the user has
-     * made is never overridden.
-     */
-    private suspend fun maybeAutoEnableRegionalFeed() {
-        val all = feedDao.all()
+    private suspend fun maybeAutoEnableRegionalFeedLocked() {
+        val all = feedDao.all().filterNot { it.deleting }
         val builtIns = all.filter { it.builtIn }
         if (builtIns.isEmpty()) return
         val pristine = builtIns.all { !it.enabled && it.lastSyncMillis == 0L } &&
@@ -377,55 +579,65 @@ class EpgRepository(
 
     companion object {
         private const val TAG = "EpgRepository"
+        private const val DATABASE_NAME = "opentv.db"
 
-        /** Writes per transaction. Large enough to be fast, small enough not to hold WAL open. */
         const val BATCH_SIZE = 500
+        const val DELETE_BATCH_SIZE = 1_000
+        const val MAX_PROGRAMMES_PER_FEED = 150_000
+        const val MAX_PROGRAMMES_TOTAL = 200_000
+        const val MAX_ALIASES_PER_FEED = 20_000
 
-        /** Rows removed per transaction so feed cleanup never monopolises the guide database. */
-        const val DELETE_BATCH_SIZE = 2_000
+        const val MAX_EPG_ID_CHARS = 512
+        const val MAX_TITLE_CHARS = 512
+        const val MAX_DESCRIPTION_CHARS = 2_048
+        const val MAX_CATEGORY_CHARS = 128
+        const val MAX_URL_CHARS = 2_048
 
-        /** Keep finished programmes for a day so "what was on" still works. */
         val RETENTION_PAST_MILLIS: Long = TimeUnit.DAYS.toMillis(1)
-
-        /** Feeds publish rolling windows; refreshing more often than this is rude. */
+        val RETENTION_FUTURE_MILLIS: Long = TimeUnit.DAYS.toMillis(8)
         val REFRESH_INTERVAL_MILLIS: Long = TimeUnit.HOURS.toMillis(6)
-
-        /**
-         * Refresh early when the saved guide no longer covers the next scheduled refresh window.
-         * This makes the database a useful offline cache instead of allowing a recently-downloaded
-         * but unusually short XMLTV file to run dry before the six-hour worker wakes again.
-         */
         val MIN_CACHED_FUTURE_MILLIS: Long = TimeUnit.HOURS.toMillis(6)
-
-        /** A short-coverage feed may be legitimate; do not re-download it on every app reopen. */
         val LOW_COVERAGE_RETRY_MILLIS: Long = TimeUnit.HOURS.toMillis(1)
+
+        /** Measured for this Shield's 5.06 GiB writable partition. */
+        const val SOFT_FREE_RESERVE_BYTES: Long = 1_342_177_280L // 1.25 GiB
+        const val HARD_FREE_FLOOR_BYTES: Long = 1_181_116_006L // 1.10 GiB
+        const val WAL_CHECKPOINT_BYTES: Long = 67_108_864L // 64 MiB
+        const val MIN_COVERAGE_PERCENT = 70
+
+        val FAILURE_BACKOFFS_MILLIS: LongArray = longArrayOf(
+            TimeUnit.MINUTES.toMillis(15),
+            TimeUnit.HOURS.toMillis(1),
+            TimeUnit.HOURS.toMillis(6),
+            TimeUnit.HOURS.toMillis(24),
+        )
+
+        internal fun retryBackoffMillis(failureCount: Int): Long =
+            if (failureCount <= 0) 0L
+            else FAILURE_BACKOFFS_MILLIS[(failureCount - 1).coerceAtMost(FAILURE_BACKOFFS_MILLIS.lastIndex)]
 
         internal fun shouldRefreshFeed(
             lastSyncMillis: Long,
-            cachedUntilMillis: Long?,
+            lastAttemptMillis: Long,
+            failureCount: Int,
+            populatedChannels: Int,
+            coveredChannels: Int,
             nowUtcMillis: Long,
             force: Boolean,
         ): Boolean {
-            if (force || lastSyncMillis <= 0L) return true
-            val ageMillis = (nowUtcMillis - lastSyncMillis).coerceAtLeast(0L)
-            if (ageMillis >= REFRESH_INTERVAL_MILLIS) return true
-            if (ageMillis < LOW_COVERAGE_RETRY_MILLIS) return false
-            return cachedUntilMillis == null ||
-                cachedUntilMillis < nowUtcMillis + MIN_CACHED_FUTURE_MILLIS
+            if (force) return true
+            val attemptAge = (nowUtcMillis - lastAttemptMillis).coerceAtLeast(0L)
+            if (failureCount > 0 && attemptAge < retryBackoffMillis(failureCount)) return false
+            if (lastSyncMillis <= 0L) return true
+            val successAge = (nowUtcMillis - lastSyncMillis).coerceAtLeast(0L)
+            if (successAge >= REFRESH_INTERVAL_MILLIS) return true
+            if (attemptAge < LOW_COVERAGE_RETRY_MILLIS) return false
+            if (populatedChannels <= 0) return true
+            return coveredChannels * 100L < populatedChannels * MIN_COVERAGE_PERCENT.toLong()
         }
 
-        /**
-         * The curated built-in list. Criteria for being here: free, no key or signup,
-         * openly licensed or explicitly public, and reachable as plain XMLTV(.gz).
-         * All ship disabled; the user turns on the one for where they live.
-         *
-         * The UK Freeview entry is GPL-3.0 (same licence as OpenTV), regenerated every
-         * 12 h, ~270 channels with logos — verified working before it earned this slot.
-         */
-        /** A region needs at least this many prefixed channels before we act on it. */
         const val MIN_CHANNELS_FOR_AUTO_REGION = 5
 
-        /** Region tag (as providers write it) → built-in feed name to auto-enable. */
         val REGION_TO_FEED: Map<String, String> = mapOf(
             "UK" to "UK — Freeview (free-to-air)",
             "GB" to "UK — Freeview (free-to-air)",

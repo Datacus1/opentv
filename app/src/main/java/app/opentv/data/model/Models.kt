@@ -195,6 +195,12 @@ data class EpgFeed(
     val builtIn: Boolean = false,
     val enabled: Boolean = true,
     val lastSyncMillis: Long = 0,
+    /** Last attempted download, successful or not; keeps broken feeds from retrying every launch. */
+    val lastAttemptMillis: Long = 0,
+    /** Consecutive failed attempts, used for bounded exponential backoff. */
+    val failureCount: Int = 0,
+    /** Persisted tombstone so interrupted feed removal resumes safely on the next sync. */
+    val deleting: Boolean = false,
     /** Human-readable outcome of the last sync attempt, shown in settings. */
     val lastResult: String = "",
 )
@@ -225,14 +231,13 @@ data class EpgChannelAlias(
  */
 @Entity(
     tableName = "programmes",
+    primaryKeys = ["feedId", "epgChannelId", "startUtcMillis"],
     indices = [
-        Index(value = ["feedId", "epgChannelId", "startUtcMillis"], unique = true),
         Index(value = ["endUtcMillis"]),
         Index(value = ["epgChannelId"]),
     ],
 )
 data class Programme(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0,
     /** The [EpgFeed] this came from. */
     val feedId: Long,
     val epgChannelId: String,
@@ -244,6 +249,8 @@ data class Programme(
     val season: Int? = null,
     val episode: Int? = null,
     val iconUrl: String? = null,
+    /** Successful refresh token that most recently observed this natural-key programme. */
+    val lastSeenSyncMillis: Long = 0,
 ) {
     val durationMillis: Long get() = endUtcMillis - startUtcMillis
 

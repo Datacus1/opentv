@@ -71,7 +71,7 @@ class Converters {
         SeriesRule::class,
         Reminder::class,
     ],
-    version = 11,
+    version = 12,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -272,6 +272,63 @@ abstract class OpenTvDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v11 → v12: Shield-safe guide lifecycle.
+         *
+         * A programme's real identity is (feed, channel, start), not its generated row id. Rebuild
+         * the table with that natural composite primary key so Room @Upsert updates schedule
+         * corrections rather than colliding on a secondary unique index and updating id 0. The
+         * refresh stamp supports post-success stale-row cleanup. Feed attempt/backoff and deletion
+         * fields make retries bounded and removals resumable after process death.
+         */
+        internal val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `epg_feeds` ADD COLUMN `lastAttemptMillis` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `epg_feeds` ADD COLUMN `failureCount` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `epg_feeds` ADD COLUMN `deleting` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `programmes_new` (
+                        `feedId` INTEGER NOT NULL,
+                        `epgChannelId` TEXT NOT NULL,
+                        `startUtcMillis` INTEGER NOT NULL,
+                        `endUtcMillis` INTEGER NOT NULL,
+                        `title` TEXT NOT NULL,
+                        `description` TEXT,
+                        `category` TEXT,
+                        `season` INTEGER,
+                        `episode` INTEGER,
+                        `iconUrl` TEXT,
+                        `lastSeenSyncMillis` INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY(`feedId`, `epgChannelId`, `startUtcMillis`)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    INSERT OR REPLACE INTO `programmes_new` (
+                        `feedId`, `epgChannelId`, `startUtcMillis`, `endUtcMillis`, `title`,
+                        `description`, `category`, `season`, `episode`, `iconUrl`,
+                        `lastSeenSyncMillis`
+                    )
+                    SELECT `feedId`, `epgChannelId`, `startUtcMillis`, `endUtcMillis`, `title`,
+                           `description`, `category`, `season`, `episode`, `iconUrl`, 0
+                    FROM `programmes`
+                    """.trimIndent(),
+                )
+                db.execSQL("DROP TABLE `programmes`")
+                db.execSQL("ALTER TABLE `programmes_new` RENAME TO `programmes`")
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_programmes_endUtcMillis` " +
+                        "ON `programmes` (`endUtcMillis`)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_programmes_epgChannelId` " +
+                        "ON `programmes` (`epgChannelId`)",
+                )
+            }
+        }
+
         fun build(context: Context): OpenTvDatabase =
             Room.databaseBuilder(context, OpenTvDatabase::class.java, "opentv.db")
                 // WAL keeps guide writes from blocking guide reads, so a background EPG
@@ -280,6 +337,7 @@ abstract class OpenTvDatabase : RoomDatabase() {
                 .addMigrations(
                     MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
                     MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
+                    MIGRATION_11_12,
                 )
                 /*
                  * Pre-1.0 policy: schema changes drop and rebuild the database. Everything

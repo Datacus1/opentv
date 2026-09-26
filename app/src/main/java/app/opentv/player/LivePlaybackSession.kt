@@ -83,6 +83,7 @@ class LivePlaybackSession(
         debounce: Boolean,
         debounceMillis: Long? = null,
     ): Boolean {
+        active.set(true)
         if (controller.canReuse(request)) {
             Log.i(TAG, "event=reuse")
             return true
@@ -104,9 +105,15 @@ class LivePlaybackSession(
         handoffExpiryJob?.cancel()
         handoffExpiryJob = null
         controller.stop()
+        active.set(false)
     }
 
-    private companion object {
+    companion object {
+        private val active = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        /** Storage maintenance uses this without constructing another player at app startup. */
+        fun isActive(): Boolean = active.get()
+
         const val TAG = "OpenTVLiveSession"
         const val HANDOFF_TIMEOUT_MILLIS = 1_500L
         const val GUIDE_SWITCH_DEBOUNCE_MILLIS = 700L

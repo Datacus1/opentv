@@ -316,19 +316,22 @@ data class CategoryChannelCount(val sourceId: Long, val categoryId: String, val 
 
 @Dao
 interface EpgFeedDao {
-    @Query("SELECT * FROM epg_feeds ORDER BY builtIn DESC, id")
+    @Query("SELECT * FROM epg_feeds WHERE deleting = 0 ORDER BY builtIn DESC, id")
     fun observeAll(): Flow<List<EpgFeed>>
 
     @Query("SELECT * FROM epg_feeds")
     suspend fun all(): List<EpgFeed>
 
-    @Query("SELECT * FROM epg_feeds WHERE enabled = 1")
+    @Query("SELECT * FROM epg_feeds WHERE enabled = 1 AND deleting = 0")
     suspend fun enabled(): List<EpgFeed>
 
-    @Query("SELECT * FROM epg_feeds WHERE providerSourceId = :sourceId")
+    @Query("SELECT * FROM epg_feeds WHERE deleting = 1")
+    suspend fun pendingDeletion(): List<EpgFeed>
+
+    @Query("SELECT * FROM epg_feeds WHERE providerSourceId = :sourceId AND deleting = 0")
     suspend fun forProvider(sourceId: Long): EpgFeed?
 
-    @Query("SELECT * FROM epg_feeds WHERE url = :url")
+    @Query("SELECT * FROM epg_feeds WHERE url = :url AND deleting = 0")
     suspend fun byUrl(url: String): EpgFeed?
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
@@ -340,8 +343,27 @@ interface EpgFeedDao {
     @Query("UPDATE epg_feeds SET enabled = :enabled WHERE id = :id")
     suspend fun setEnabled(id: Long, enabled: Boolean)
 
-    @Query("UPDATE epg_feeds SET lastSyncMillis = :millis, lastResult = :result WHERE id = :id")
-    suspend fun markSynced(id: Long, millis: Long, result: String)
+    @Query(
+        """
+        UPDATE epg_feeds
+        SET lastSyncMillis = :millis, lastAttemptMillis = :millis,
+            failureCount = 0, lastResult = :result
+        WHERE id = :id
+        """
+    )
+    suspend fun markSucceeded(id: Long, millis: Long, result: String)
+
+    @Query(
+        """
+        UPDATE epg_feeds
+        SET lastAttemptMillis = :millis, failureCount = failureCount + 1, lastResult = :result
+        WHERE id = :id
+        """
+    )
+    suspend fun markFailed(id: Long, millis: Long, result: String)
+
+    @Query("UPDATE epg_feeds SET deleting = 1, enabled = 0 WHERE id = :id")
+    suspend fun markDeleting(id: Long)
 
     @Query("DELETE FROM epg_feeds WHERE id = :id")
     suspend fun delete(id: Long)
@@ -349,8 +371,14 @@ interface EpgFeedDao {
 
 @Dao
 interface EpgChannelAliasDao {
-    @Query("SELECT * FROM epg_channels")
-    suspend fun all(): List<EpgChannelAlias>
+    @Query(
+        """
+        SELECT c.* FROM epg_channels c
+        INNER JOIN epg_feeds f ON f.id = c.feedId
+        WHERE f.enabled = 1 AND f.deleting = 0
+        """
+    )
+    suspend fun allFromEnabledFeeds(): List<EpgChannelAlias>
 
     @Query("SELECT COUNT(*) FROM epg_channels")
     suspend fun count(): Int
@@ -360,6 +388,12 @@ interface EpgChannelAliasDao {
 
     @Query("DELETE FROM epg_channels WHERE feedId = :feedId")
     suspend fun deleteForFeed(feedId: Long)
+
+    @Transaction
+    suspend fun replaceForFeed(feedId: Long, aliases: List<EpgChannelAlias>) {
+        deleteForFeed(feedId)
+        aliases.chunked(500).forEach { upsertAll(it) }
+    }
 }
 
 @Dao
@@ -374,10 +408,12 @@ interface ProgrammeDao {
      */
     @Query(
         """
-        SELECT * FROM programmes
-        WHERE endUtcMillis > :fromUtcMillis
-          AND startUtcMillis < :toUtcMillis
-        ORDER BY epgChannelId, startUtcMillis
+        SELECT p.* FROM programmes p
+        INNER JOIN epg_feeds f ON f.id = p.feedId
+        WHERE f.enabled = 1 AND f.deleting = 0
+          AND p.endUtcMillis > :fromUtcMillis
+          AND p.startUtcMillis < :toUtcMillis
+        ORDER BY p.epgChannelId, p.startUtcMillis
         """
     )
     fun observeWindow(fromUtcMillis: Long, toUtcMillis: Long): Flow<List<Programme>>
@@ -385,17 +421,21 @@ interface ProgrammeDao {
     /** What is on right now, for the channel list's "now playing" line. */
     @Query(
         """
-        SELECT * FROM programmes
-        WHERE startUtcMillis <= :nowUtcMillis AND endUtcMillis > :nowUtcMillis
+        SELECT p.* FROM programmes p
+        INNER JOIN epg_feeds f ON f.id = p.feedId
+        WHERE f.enabled = 1 AND f.deleting = 0
+          AND p.startUtcMillis <= :nowUtcMillis AND p.endUtcMillis > :nowUtcMillis
         """
     )
     fun observeNow(nowUtcMillis: Long): Flow<List<Programme>>
 
     @Query(
         """
-        SELECT * FROM programmes
-        WHERE epgChannelId = :channelId AND endUtcMillis > :nowUtcMillis
-        ORDER BY startUtcMillis LIMIT :limit
+        SELECT p.* FROM programmes p
+        INNER JOIN epg_feeds f ON f.id = p.feedId
+        WHERE f.enabled = 1 AND f.deleting = 0
+          AND p.epgChannelId = :channelId AND p.endUtcMillis > :nowUtcMillis
+        ORDER BY p.startUtcMillis LIMIT :limit
         """
     )
     suspend fun upcoming(channelId: String, nowUtcMillis: Long, limit: Int): List<Programme>
@@ -403,23 +443,77 @@ interface ProgrammeDao {
     @Query("SELECT COUNT(*) FROM programmes WHERE feedId = :feedId")
     suspend fun countForFeed(feedId: Long): Int
 
-    /** Furthest point covered by this feed's on-disk guide, or null before its first good sync. */
-    @Query("SELECT MAX(endUtcMillis) FROM programmes WHERE feedId = :feedId")
-    suspend fun latestEndForFeed(feedId: Long): Long?
+    @Query("SELECT COUNT(*) FROM programmes")
+    suspend fun countAll(): Int
+
+    /** Channels with usable cached data in the bounded guide window. */
+    @Query(
+        """
+        SELECT COUNT(DISTINCT epgChannelId) FROM programmes
+        WHERE feedId = :feedId AND endUtcMillis > :nowUtcMillis
+          AND startUtcMillis < :windowEndMillis
+        """
+    )
+    suspend fun populatedChannelsForFeed(
+        feedId: Long,
+        nowUtcMillis: Long,
+        windowEndMillis: Long,
+    ): Int
+
+    /** Of the populated channels, how many have a programme spanning the six-hour target. */
+    @Query(
+        """
+        SELECT COUNT(DISTINCT epgChannelId) FROM programmes
+        WHERE feedId = :feedId
+          AND startUtcMillis <= :targetMillis AND endUtcMillis > :targetMillis
+        """
+    )
+    suspend fun channelsCovering(feedId: Long, targetMillis: Long): Int
 
     /** Distinct guide channels that actually have programmes — the match report's baseline. */
-    @Query("SELECT DISTINCT epgChannelId FROM programmes")
-    suspend fun channelIdsWithProgrammes(): List<String>
+    @Query(
+        """
+        SELECT DISTINCT p.epgChannelId FROM programmes p
+        INNER JOIN epg_feeds f ON f.id = p.feedId
+        WHERE f.enabled = 1 AND f.deleting = 0
+        """
+    )
+    suspend fun channelIdsWithProgrammesFromEnabledFeeds(): List<String>
 
     @Upsert
     suspend fun upsertAll(programmes: List<Programme>)
 
-    /** Housekeeping: drop anything that finished before the retention cut-off. */
-    @Query("DELETE FROM programmes WHERE endUtcMillis < :beforeUtcMillis")
-    suspend fun deleteEndedBefore(beforeUtcMillis: Long)
+    /** Bounded retention cleanup; rowid works with the composite natural primary key. */
+    @Query(
+        """
+        DELETE FROM programmes WHERE rowid IN (
+            SELECT rowid FROM programmes WHERE endUtcMillis < :beforeUtcMillis LIMIT :limit
+        )
+        """
+    )
+    suspend fun deleteExpiredBatch(beforeUtcMillis: Long, limit: Int): Int
 
-    @Query("DELETE FROM programmes WHERE feedId = :feedId")
-    suspend fun deleteForFeed(feedId: Long)
+    /** Reject corrupt/far-future XMLTV dates outside the guide's visible horizon. */
+    @Query(
+        """
+        DELETE FROM programmes WHERE rowid IN (
+            SELECT rowid FROM programmes WHERE startUtcMillis > :afterUtcMillis LIMIT :limit
+        )
+        """
+    )
+    suspend fun deleteTooFarFutureBatch(afterUtcMillis: Long, limit: Int): Int
+
+    /** Removes rows absent from a complete successful refresh, in restart-safe batches. */
+    @Query(
+        """
+        DELETE FROM programmes WHERE rowid IN (
+            SELECT rowid FROM programmes
+            WHERE feedId = :feedId AND lastSeenSyncMillis != :syncMillis
+            LIMIT :limit
+        )
+        """
+    )
+    suspend fun deleteStaleBatchForFeed(feedId: Long, syncMillis: Long, limit: Int): Int
 
     /**
      * Removes at most [limit] rows for one feed.
@@ -431,12 +525,34 @@ interface ProgrammeDao {
     @Query(
         """
         DELETE FROM programmes
-        WHERE id IN (
-            SELECT id FROM programmes WHERE feedId = :feedId LIMIT :limit
+        WHERE rowid IN (
+            SELECT rowid FROM programmes WHERE feedId = :feedId LIMIT :limit
         )
         """
     )
     suspend fun deleteBatchForFeed(feedId: Long, limit: Int): Int
+
+    /** Removes the farthest-future rows first when one feed exceeds its hard row budget. */
+    @Query(
+        """
+        DELETE FROM programmes WHERE rowid IN (
+            SELECT rowid FROM programmes WHERE feedId = :feedId
+            ORDER BY startUtcMillis DESC LIMIT :limit
+        )
+        """
+    )
+    suspend fun deleteFarthestFutureBatchForFeed(feedId: Long, limit: Int): Int
+
+    /** Final global guard: also discards only the farthest-future rows. */
+    @Query(
+        """
+        DELETE FROM programmes WHERE rowid IN (
+            SELECT rowid FROM programmes
+            ORDER BY startUtcMillis DESC LIMIT :limit
+        )
+        """
+    )
+    suspend fun deleteFarthestFutureBatch(limit: Int): Int
 }
 
 @Dao

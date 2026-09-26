@@ -27,8 +27,8 @@ class OpenTvApp : Application(), ImageLoaderFactory {
      * The app-wide Coil loader, tuned for a poster-and-logo heavy UI on a low-end TV box. The
      * default loader keeps a small memory cache and no disk cache, so scrolling back through a
      * shelf — or reopening Movies — re-downloads and re-decodes every image. Here:
-     *  - a generous memory cache and a 256 MB disk cache mean art you've already seen paints from
-     *    cache, instantly, instead of hitting the network;
+     *  - a modest 64 MB disk cache keeps common art local without competing with the guide on
+     *    storage-constrained TV boxes;
      *  - no crossfade — an immediate swap reads as snappier on a d-pad grid than a fade, and skips
      *    a frame of blending per image;
      *  - RGB_565 for opaque art (posters/backdrops) halves the memory per bitmap, so more fits in
@@ -44,7 +44,7 @@ class OpenTvApp : Application(), ImageLoaderFactory {
             .diskCache {
                 DiskCache.Builder()
                     .directory(cacheDir.resolve("image_cache"))
-                    .maxSizeBytes(256L * 1024 * 1024)
+                    .maxSizeBytes(64L * 1024 * 1024)
                     .build()
             }
             .crossfade(false)
