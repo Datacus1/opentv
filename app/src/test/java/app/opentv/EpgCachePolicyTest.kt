@@ -11,6 +11,29 @@ import java.util.concurrent.TimeUnit
 import org.junit.Test
 
 class EpgCachePolicyTest {
+
+    @Test
+    fun `new sports companion inherits an enabled US guide exactly once`() {
+        assertThat(
+            EpgRepository.defaultEnabledForNewBuiltIn(
+                EpgRepository.USA_SPORTS_FEED_NAME,
+                usaMainEnabled = true,
+            ),
+        ).isTrue()
+        assertThat(
+            EpgRepository.defaultEnabledForNewBuiltIn(
+                EpgRepository.USA_SPORTS_FEED_NAME,
+                usaMainEnabled = false,
+            ),
+        ).isFalse()
+        assertThat(
+            EpgRepository.defaultEnabledForNewBuiltIn(
+                EpgRepository.USA_FEED_NAME,
+                usaMainEnabled = true,
+            ),
+        ).isFalse()
+    }
+
     private val now = 1_800_000_000_000L
 
     @Test

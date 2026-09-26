@@ -191,7 +191,14 @@ class EpgRepository(
                     )
                 }
             } else if (feedDao.byUrl(url) == null) {
-                feedDao.insert(EpgFeed(name = name, url = url, builtIn = true, enabled = false))
+                // The compact team-sports guide complements the already-selected US lineup.
+                // Inherit that choice only when the feed is first introduced. If the user later
+                // disables sports, this branch no longer runs and their preference is preserved.
+                val enabled = defaultEnabledForNewBuiltIn(
+                    name = name,
+                    usaMainEnabled = builtInsByName[USA_FEED_NAME]?.enabled == true,
+                )
+                feedDao.insert(EpgFeed(name = name, url = url, builtIn = true, enabled = enabled))
             }
         }
     }
@@ -530,17 +537,23 @@ class EpgRepository(
 
     private suspend fun runMatcherLocked(): Pair<Int, Int> {
         val aliases = aliasDao.allFromEnabledFeeds()
-        val index = EpgMatcher.buildIndex(aliases.map { it.epgId to it.displayName })
         val populated = programmeDao.channelIdsWithProgrammesFromEnabledFeeds().toHashSet()
+        // Empty aliases must not make a populated alias look ambiguous. The UI can only use a
+        // match backed by programmes, so build the automatic index from that same usable set.
+        val populatedAliases = aliases.filter { it.epgId in populated }
+        val index = EpgMatcher.buildIndex(populatedAliases.map { it.epgId to it.displayName })
         val channels = channelDao.allForMatching()
         var matched = 0
 
         for (channel in channels) {
-            val newMatch = index.match(channel.groupKey)
+            // Recompute from the preserved provider name so matcher improvements take effect on
+            // an in-place upgrade even before the next catalogue refresh rewrites stored keys.
+            val currentGroupKey = ChannelNameNormalizer.normalize(channel.name).groupKey
+            val newMatch = index.matchProvider(currentGroupKey, channel.epgChannelId)
             if (newMatch != channel.matchedEpgId) channelDao.setMatchedEpgId(channel.id, newMatch)
             if (
                 channel.epgCandidates.any { it in populated } ||
-                (newMatch != null && newMatch in populated)
+                    (newMatch != null && newMatch in populated)
             ) matched++
         }
 
@@ -638,11 +651,19 @@ class EpgRepository(
 
         const val MIN_CHANNELS_FOR_AUTO_REGION = 5
 
+        const val USA_FEED_NAME = "USA — epgshare01"
+        const val USA_SPORTS_FEED_NAME = "USA team sports — epgshare01"
+
+        internal fun defaultEnabledForNewBuiltIn(
+            name: String,
+            usaMainEnabled: Boolean,
+        ): Boolean = name == USA_SPORTS_FEED_NAME && usaMainEnabled
+
         val REGION_TO_FEED: Map<String, String> = mapOf(
             "UK" to "UK — Freeview (free-to-air)",
             "GB" to "UK — Freeview (free-to-air)",
-            "US" to "USA — epgshare01",
-            "USA" to "USA — epgshare01",
+            "US" to USA_FEED_NAME,
+            "USA" to USA_FEED_NAME,
             "CA" to "Canada — epgshare01",
             "AU" to "Australia — epgshare01",
             "AUS" to "Australia — epgshare01",
@@ -653,8 +674,10 @@ class EpgRepository(
                 "https://raw.githubusercontent.com/dp247/Freeview-EPG/master/epg.xml",
             "UK — epgshare01 (Sky lineup)" to
                 "https://epgshare01.online/epgshare01/epg_ripper_UK1.xml.gz",
-            "USA — epgshare01" to
+            USA_FEED_NAME to
                 "https://epgshare01.online/epgshare01/epg_ripper_US2.xml.gz",
+            USA_SPORTS_FEED_NAME to
+                "https://epgshare01.online/epgshare01/epg_ripper_US_SPORTS1.xml.gz",
             "Canada — epgshare01" to
                 "https://epgshare01.online/epgshare01/epg_ripper_CA2.xml.gz",
             "Australia — epgshare01" to

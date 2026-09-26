@@ -184,10 +184,14 @@ object ChannelNameNormalizer {
      * users actually notice. The word-number folding handles `BBC ONE` vs `BBC 1`.
      */
     fun groupKeyOf(name: String): String {
+        // `+` is semantic in modern network names (AMC+ / Paramount+ / Disney+), not mere
+        // punctuation. Preserve it as the word "plus" so a streaming network cannot collide
+        // with its linear namesake (AMC+ previously collapsed to the same `amc` key as AMC).
+        val semantic = name.replace("+", " plus ")
         // Split CamelCase first so `BbcOne` sees the same words as `BBC One`, then fold
         // number WORDS to digits — whole words only, never substrings, or `money` becomes
         // `m1y` on one side of a match and not the other.
-        val spaced = CAMEL_BOUNDARY.replace(name, "$1 $2")
+        val spaced = CAMEL_BOUNDARY.replace(semantic, "$1 $2")
         return spaced.lowercase()
             .split(NON_ALNUM)
             .filter { it.isNotEmpty() }

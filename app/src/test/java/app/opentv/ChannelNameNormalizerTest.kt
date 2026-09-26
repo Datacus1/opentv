@@ -121,4 +121,12 @@ class ChannelNameNormalizerTest {
 
         assertThat(keys.distinct()).hasSize(1)
     }
+
+    @Test
+    fun `plus networks remain distinct from their linear namesakes`() {
+        assertThat(ChannelNameNormalizer.groupKeyOf("AMC+")).isEqualTo("amcplus")
+        assertThat(ChannelNameNormalizer.groupKeyOf("AMC")).isEqualTo("amc")
+        assertThat(ChannelNameNormalizer.groupKeyOf("Paramount+ with Showtime"))
+            .isEqualTo("paramountpluswithshowtime")
+    }
 }
