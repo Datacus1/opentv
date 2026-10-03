@@ -18,6 +18,7 @@ import app.opentv.data.model.EpgChannelAlias
 import app.opentv.data.model.EpgFeed
 import app.opentv.data.model.Programme
 import app.opentv.data.model.Source
+import app.opentv.data.model.SourceKind
 import app.opentv.data.parser.ChannelNameNormalizer
 import app.opentv.data.parser.XmltvParser
 import app.opentv.data.remote.XtreamApi
@@ -294,6 +295,12 @@ class EpgRepository(
                     }
                 }
 
+                // Some Xtream panels omit individual channels from their bulk XMLTV while their
+                // bounded per-stream endpoint still has a schedule. FOX East is verified to need
+                // that fallback on this provider. This adds at most 100 rows per source and never
+                // downloads a second regional/national guide.
+                written += syncProviderShortEpgFallbacksLocked(nowUtcMillis, force)
+
                 runBoundedRetentionLocked(nowUtcMillis)
                 val (matched, total) = runMatcherLocked()
                 truncateWalWhenIdle()
@@ -301,6 +308,78 @@ class EpgRepository(
                 SyncSummary(succeeded, failed, written, matched, total)
             }
         }
+
+    private suspend fun syncProviderShortEpgFallbacksLocked(
+        nowUtcMillis: Long,
+        force: Boolean,
+    ): Int {
+        var written = 0
+        val oldestAllowed = nowUtcMillis - RETENTION_PAST_MILLIS
+        val newestAllowed = nowUtcMillis + RETENTION_FUTURE_MILLIS
+
+        for (source in sourceDao.enabled().filter { it.kind == SourceKind.XTREAM }) {
+            val feed = feedDao.forProvider(source.id)?.takeIf { it.enabled && !it.deleting }
+                ?: continue
+            val candidates = channelDao.forSource(source.id)
+                .filter { it.groupKey in PROVIDER_SHORT_EPG_GROUP_KEYS }
+                .sortedByDescending { it.qualityRank }
+            for ((groupKey, variants) in candidates.groupBy { it.groupKey }) {
+                val syntheticId = providerShortEpgId(source.id, groupKey)
+                val cachedThrough = programmeDao.upcoming(
+                    syntheticId,
+                    nowUtcMillis,
+                    PROVIDER_SHORT_EPG_LIMIT,
+                ).maxOfOrNull { it.endUtcMillis } ?: 0L
+                if (!force && cachedThrough >= nowUtcMillis + MIN_CACHED_FUTURE_MILLIS) {
+                    continue
+                }
+
+                val listings = variants.firstNotNullOfOrNull { channel ->
+                    runCatching { api.shortEpg(source, channel.streamId, PROVIDER_SHORT_EPG_LIMIT) }
+                        .onFailure {
+                            Log.w(TAG, "Short EPG fallback failed for ${channel.displayName}: ${it.message}")
+                        }
+                        .getOrNull()
+                        ?.takeIf { it.isNotEmpty() }
+                }.orEmpty()
+                if (listings.isEmpty()) continue
+
+                val programmes = listings.mapNotNull { item ->
+                    if (item.endUtcMillis < oldestAllowed || item.startUtcMillis > newestAllowed) {
+                        return@mapNotNull null
+                    }
+                    sanitizeProgramme(
+                        Programme(
+                            feedId = feed.id,
+                            epgChannelId = syntheticId,
+                            startUtcMillis = item.startUtcMillis,
+                            endUtcMillis = item.endUtcMillis,
+                            title = item.title,
+                            description = item.description,
+                        ),
+                        nowUtcMillis,
+                    )
+                }
+                if (programmes.isEmpty()) continue
+
+                ensureHardWriteReserve()
+                programmeDao.upsertAll(programmes)
+                aliasDao.upsertAll(
+                    listOf(
+                        EpgChannelAlias(
+                            feedId = feed.id,
+                            epgId = syntheticId,
+                            displayName = variants.first().displayName,
+                            normalizedKey = groupKey,
+                        ),
+                    ),
+                )
+                written += programmes.size
+                Log.i(TAG, "Short EPG fallback populated ${programmes.size} rows for ${variants.first().displayName}")
+            }
+        }
+        return written
+    }
 
     private suspend fun coverageFor(feedId: Long, nowUtcMillis: Long): FeedCoverage {
         val populated = programmeDao.populatedChannelsForFeed(
@@ -650,6 +729,12 @@ class EpgRepository(
         }
 
         const val MIN_CHANNELS_FOR_AUTO_REGION = 5
+
+        const val PROVIDER_SHORT_EPG_LIMIT = 100
+        internal val PROVIDER_SHORT_EPG_GROUP_KEYS: Set<String> = setOf("foxeast")
+
+        internal fun providerShortEpgId(sourceId: Long, groupKey: String): String =
+            "opentv.provider-short.$sourceId.$groupKey"
 
         const val USA_FEED_NAME = "USA — epgshare01"
         const val USA_SPORTS_FEED_NAME = "USA team sports — epgshare01"

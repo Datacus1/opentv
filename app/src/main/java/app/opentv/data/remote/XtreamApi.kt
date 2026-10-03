@@ -13,6 +13,8 @@ import app.opentv.data.model.Series
 import app.opentv.data.model.Source
 import app.opentv.data.model.StreamKind
 import java.io.InputStream
+import java.nio.charset.StandardCharsets
+import java.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -119,6 +121,25 @@ class XtreamApi(
                 sortIndex = obj["num"].asIntOrNull ?: index,
             )
         }
+    }
+
+    /**
+     * Lightweight guide lookup for one live stream.
+     *
+     * Several Xtream providers omit a channel from their bulk XMLTV file while still exposing
+     * its schedule through `get_short_epg`. Keep this request deliberately per-stream and bounded;
+     * it is a surgical fallback, not a second catalogue-sized guide download.
+     */
+    suspend fun shortEpg(
+        source: Source,
+        streamId: String,
+        limit: Int = 100,
+    ): List<ShortEpgListing> = withContext(Dispatchers.IO) {
+        val body = getJson(source, "get_short_epg") {
+            it.addQueryParameter("stream_id", streamId)
+            it.addQueryParameter("limit", limit.coerceIn(1, 100).toString())
+        }
+        parseShortEpg(body)
     }
 
     suspend fun movies(source: Source): List<Movie> = withContext(Dispatchers.IO) {
@@ -378,6 +399,13 @@ class XtreamApi(
         val timezone: String?,
     )
 
+    data class ShortEpgListing(
+        val startUtcMillis: Long,
+        val endUtcMillis: Long,
+        val title: String,
+        val description: String?,
+    )
+
     /**
      * Rich per-movie metadata from `get_vod_info`. Every field is nullable — the caller merges it
      * over the (possibly sparse) row it already has, only filling blanks. `plot`/`rating`/`year`/
@@ -406,6 +434,39 @@ class XtreamApi(
         val rating: Double?,
         val year: Int?,
     )
+}
+
+/** Pure parser kept visible to unit tests; malformed panel rows are skipped, never fatal. */
+internal fun parseShortEpg(root: JsonElement): List<XtreamApi.ShortEpgListing> {
+    val rows = root.jsonObjectOrNull?.get("epg_listings")?.arrayOrEmpty.orEmpty()
+    return rows.mapNotNull { element ->
+        val row = element.jsonObjectOrNull ?: return@mapNotNull null
+        val startSeconds = row["start_timestamp"].asLongOrNull ?: return@mapNotNull null
+        val stopSeconds = row["stop_timestamp"].asLongOrNull ?: return@mapNotNull null
+        if (startSeconds <= 0L || stopSeconds <= startSeconds) return@mapNotNull null
+        val title = decodeXtreamText(row["title"].asStringOrNull).orEmpty().trim()
+        if (title.isEmpty()) return@mapNotNull null
+        XtreamApi.ShortEpgListing(
+            startUtcMillis = startSeconds * 1_000L,
+            endUtcMillis = stopSeconds * 1_000L,
+            title = title,
+            description = decodeXtreamText(row["description"].asStringOrNull)
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() },
+        )
+    }.distinctBy { it.startUtcMillis }
+}
+
+/** Xtream panels disagree on whether title/description are plain UTF-8 or Base64. */
+private fun decodeXtreamText(value: String?): String? {
+    if (value.isNullOrBlank()) return null
+    val decoded = runCatching {
+        String(Base64.getDecoder().decode(value), StandardCharsets.UTF_8)
+    }.getOrNull() ?: return value
+    val looksLikeText = decoded.isNotBlank() &&
+        !decoded.contains('\uFFFD') &&
+        decoded.all { it == '\n' || it == '\r' || it == '\t' || !it.isISOControl() }
+    return if (looksLikeText) decoded else value
 }
 
 // ---- Defensive JSON accessors ------------------------------------------------------------
