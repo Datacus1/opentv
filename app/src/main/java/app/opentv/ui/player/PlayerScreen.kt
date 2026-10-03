@@ -15,6 +15,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -48,6 +49,7 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Subtitles
+import androidx.compose.material.icons.filled.ViewWeek
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -174,6 +176,7 @@ fun PlayerScreen(
     // Offered once per session the first time the user records here while OpenTV isn't exempt from
     // battery optimisation, so the capture survives the screen sleeping. Never blocks recording.
     var showBackgroundPrompt by remember { mutableStateOf(false) }
+    var splitScreen by remember { mutableStateOf(false) }
 
     // Picture-in-picture. While the player is on it is "eligible" to shrink to a floating window
     // (pressing Home does it, handled in MainActivity); [inPip] drives hiding all the chrome.
@@ -196,6 +199,9 @@ fun PlayerScreen(
     // not opt in to ExoPlayer's audio-focus handling. Keep the live stream advancing in PiP,
     // but give the foreground app exclusive audible playback until OpenTV is expanded again.
     LaunchedEffect(inPip) { controller.player.volume = if (inPip) 0f else 1f }
+    // A commercial break retains only the original live stream in Android PiP. Disposing the
+    // split screen releases the extra decoder/connection before SmartTube starts playback.
+    LaunchedEffect(inPip) { if (inPip) splitScreen = false }
     val barFocus = remember { FocusRequester() }
     val panelFocus = remember { FocusRequester() }
     val rootFocus = remember { FocusRequester() }
@@ -311,7 +317,8 @@ fun PlayerScreen(
 
     // Focus: a picker's first row when one is open, otherwise the bar, otherwise the full-screen
     // catcher (so the next remote press brings the bar back).
-    LaunchedEffect(controlsVisible, panel) {
+    LaunchedEffect(controlsVisible, panel, splitScreen, inPip) {
+        if (splitScreen || inPip) return@LaunchedEffect
         if (controlsVisible) {
             delay(40)
             runCatching { if (panel != Panel.NONE) panelFocus.requestFocus() else barFocus.requestFocus() }
@@ -338,6 +345,19 @@ fun PlayerScreen(
         } else if (!controlsVisible) {
             runCatching { rootFocus.requestFocus() }
         }
+    }
+
+    if (splitScreen && !inPip) {
+        SplitScreenPlayer(
+            primary = controller,
+            primaryChannelId = currentId,
+            onExit = { splitScreen = false; reveal() },
+            onGuide = {
+                liveSession.prepareHandoff(LivePlaybackSession.Surface.GUIDE)
+                onBack()
+            },
+        )
+        return
     }
 
     Box(
@@ -406,6 +426,9 @@ fun PlayerScreen(
                 }
             },
             update = { it.resizeMode = resizeMode },
+            // Split-screen changes the output view without releasing the shared live player.
+            // Detach the old view's listeners/surface so repeated entries do not retain views.
+            onRelease = { it.player = null },
         )
 
         // The channel number as you type it, top-right, until it resolves.
@@ -508,7 +531,10 @@ fun PlayerScreen(
                     Spacer(Modifier.height(12.dp))
                 }
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     if (controller.isSeekable) {
                         BarChip(Icons.Filled.FastRewind, stringResource(R.string.player_rewind), false) {
                             controller.seekBackward(); interaction++
@@ -558,6 +584,14 @@ fun PlayerScreen(
                         selected = recordingThis,
                         iconTint = Color(0xFFE53935),
                     ) { toggleRecord() }
+                    if (currentId != null) {
+                        Spacer(Modifier.width(10.dp))
+                        BarChip(Icons.Filled.ViewWeek, stringResource(R.string.split_screen), false) {
+                            panel = Panel.NONE
+                            channelListVisible = false
+                            splitScreen = true
+                        }
+                    }
                     if (pipSupported) {
                         Spacer(Modifier.width(10.dp))
                         BarChip(Icons.Filled.PictureInPictureAlt, stringResource(R.string.player_pop_out), false) {

@@ -436,4 +436,18 @@
     <string name="settings_tmdb_save">Guardar clave</string>
     <string name="settings_tmdb_saved">Clave de TMDB guardada</string>
     <string name="settings_tmdb_active">Activa</string>
+    <string name="split_screen">Pantalla dividida</string>
+    <string name="split_choose_second">Elegir segundo canal</string>
+    <string name="split_change_second">Cambiar segundo canal</string>
+    <string name="split_left_audio">Audio izquierdo</string>
+    <string name="split_right_audio">Audio derecho</string>
+    <string name="split_expand">Ampliar imagen</string>
+    <string name="split_two_pictures">Dos imágenes</string>
+    <string name="split_exit">Salir de pantalla dividida</string>
+    <string name="split_connection_note">Dos canales usan dos conexiones del proveedor. Las grabaciones usan conexiones adicionales.</string>
+    <string name="split_audible_title">%1$s · Audio</string>
+    <string name="split_playback_error">No se pudo reproducir este canal. Prueba otro o comprueba las conexiones permitidas por tu proveedor.</string>
+    <string name="split_search_channels">Buscar canales</string>
+    <string name="split_catalogue_error">No se pudieron cargar los canales guardados.</string>
+    <string name="split_no_channels">No hay otros canales que coincidan.</string>
 </resources>

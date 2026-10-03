@@ -505,4 +505,18 @@
     <string name="settings_tmdb_save">Save key</string>
     <string name="settings_tmdb_saved">TMDB key saved</string>
     <string name="settings_tmdb_active">Active</string>
+    <string name="split_screen">Split screen</string>
+    <string name="split_choose_second">Choose second channel</string>
+    <string name="split_change_second">Change second channel</string>
+    <string name="split_left_audio">Left audio</string>
+    <string name="split_right_audio">Right audio</string>
+    <string name="split_expand">Expand picture</string>
+    <string name="split_two_pictures">Two pictures</string>
+    <string name="split_exit">Exit split screen</string>
+    <string name="split_connection_note">Two channels use two provider connections. Recordings use additional connections.</string>
+    <string name="split_audible_title">%1$s · Audio</string>
+    <string name="split_playback_error">This channel could not play. Try another channel or check your provider connection allowance.</string>
+    <string name="split_search_channels">Search channels</string>
+    <string name="split_catalogue_error">Could not load the saved channels.</string>
+    <string name="split_no_channels">No other channels match this selection.</string>
 </resources>

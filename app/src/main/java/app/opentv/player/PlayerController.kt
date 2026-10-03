@@ -96,6 +96,8 @@ class PlayerController(
      * is a network round-trip — rides over the gaps instead of stalling on every one.
      */
     private val liveRecording: Boolean = false,
+    /** The extra split-screen pane has no DVR and a bounded allocator on small TV boxes. */
+    private val multiview: Boolean = false,
 ) {
 
     /** Channel-surf debounce for this controller — longer for the preview so browsing is calm. */
@@ -206,6 +208,12 @@ class PlayerController(
             .setPreferredTextLanguage(java.util.Locale.getDefault().language)
             .setSelectUndeterminedTextLanguage(true)
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !subtitlesEnabled)
+            .apply {
+                if (multiview) {
+                    setMaxVideoSize(1920, 1080)
+                    setTunnelingEnabled(false)
+                }
+            }
             .build()
     }
 
@@ -241,6 +249,13 @@ class PlayerController(
                 )
                 // Retain the last few minutes so pause/rewind of live TV has something to seek into.
                 .apply { if (dvr) setBackBuffer(DVR_BACK_BUFFER_MILLIS, true) }
+                .apply {
+                    if (multiview) {
+                        setBackBuffer(0, false)
+                        setTargetBufferBytes(32 * 1024 * 1024)
+                        setPrioritizeTimeOverSizeThresholds(false)
+                    }
+                }
                 .build(),
         )
         .build()
