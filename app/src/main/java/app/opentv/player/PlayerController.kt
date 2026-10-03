@@ -135,6 +135,17 @@ class PlayerController(
     private var lastMetadataMimeTypes: Set<String> = emptySet()
     private var currentLiveTargetMillis = AdaptiveLivePolicy.DEFAULT_TARGET_MILLIS
     private var currentReachedReady = false
+    private val liveLearning = LiveOffsetLearningPolicy(multiview)
+
+    /** Split-screen congestion must not teach a permanent single-channel live offset. */
+    fun setMultiviewActive(active: Boolean) {
+        liveLearning.setMultiview(active)
+        if (!active && multiview) {
+            splitLoadControl?.promote()
+            trackSelector.parameters = trackSelector.buildUponParameters()
+                .setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE).build()
+        }
+    }
 
     private val liveTargetPreferences = context.getSharedPreferences(
         LIVE_TARGET_PREFERENCES,
@@ -217,6 +228,12 @@ class PlayerController(
             .build()
     }
 
+    private val splitLoadControl = if (multiview) PromotableSplitLoadControl(
+        MIN_BUFFER_MILLIS, if (dvr) DVR_MAX_BUFFER_MILLIS else MAX_BUFFER_MILLIS,
+        BUFFER_FOR_PLAYBACK_MILLIS, BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MILLIS,
+        if (dvr) DVR_BACK_BUFFER_MILLIS else 0,
+    ) else null
+
     val player: ExoPlayer = ExoPlayer.Builder(context)
         .setSeekBackIncrementMs(SEEK_INCREMENT_MILLIS)
         .setSeekForwardIncrementMs(SEEK_INCREMENT_MILLIS)
@@ -227,7 +244,7 @@ class PlayerController(
         .setTrackSelector(trackSelector)
         .setLivePlaybackSpeedControl(livePlaybackSpeedControl)
         .setLoadControl(
-            DefaultLoadControl.Builder()
+            splitLoadControl ?: DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
                     if (preview) PREVIEW_MIN_BUFFER_MILLIS else MIN_BUFFER_MILLIS,
                     when {
@@ -324,7 +341,7 @@ class PlayerController(
                         val learnedTarget = AdaptiveLivePolicy.targetAfterRebuffer(currentLiveTargetMillis)
                         if (learnedTarget != currentLiveTargetMillis) {
                             currentLiveTargetMillis = learnedTarget
-                            current?.channelId?.let { channelId ->
+                            current?.channelId?.takeIf { liveLearning.mayPersist }?.let { channelId ->
                                 liveTargetPreferences.edit()
                                     .putLong(liveTargetKey(channelId), learnedTarget)
                                     .apply()
@@ -386,6 +403,7 @@ class PlayerController(
 
             consecutiveFailures = 0
             currentReachedReady = false
+            liveLearning.beginTune()
             httpFactory.setDefaultRequestProperties(mapOf("User-Agent" to request.userAgent))
             _state.value = State.Buffering(request.title)
 
@@ -430,6 +448,10 @@ class PlayerController(
     fun retry() {
         current?.let { play(it, debounce = false) }
     }
+
+    /** Do not promote an old prepared picture while a new selection is still resolving. */
+    fun isReadyChannel(channelId: Long): Boolean =
+        current?.channelId == channelId && player.playbackState == Player.STATE_READY
 
     /** Whether [request] is already the media item prepared by this player. */
     fun canReuse(request: Request): Boolean {

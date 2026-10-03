@@ -513,6 +513,10 @@
     <string name="split_expand">Expand picture</string>
     <string name="split_two_pictures">Two pictures</string>
     <string name="split_exit">Exit split screen</string>
+    <string name="split_keep_left">Keep left channel full-screen</string>
+    <string name="split_keep_right">Keep right channel full-screen</string>
+    <string name="split_recording_blocked">The second channel is disabled while a recording is active, to protect its provider connection.</string>
+    <string name="split_recording_stopped">A recording closed the second channel. Choose it again when recording has finished.</string>
     <string name="split_connection_note">Two channels use two provider connections. Recordings use additional connections.</string>
     <string name="split_audible_title">%1$s · Audio</string>
     <string name="split_playback_error">This channel could not play. Try another channel or check your provider connection allowance.</string>

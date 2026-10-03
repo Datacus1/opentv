@@ -9,6 +9,10 @@ import app.opentv.data.model.Channel
 import app.opentv.data.parser.ChannelNameNormalizer
 
 internal object SplitScreenPolicy {
+    fun mayOpenSecondary(recordingCount: Int?): Boolean = recordingCount == 0
+
+    fun restoredChannelIndex(ids: List<Long>, lastFocusedId: Long?): Int =
+        ids.indexOf(lastFocusedId).takeIf { it >= 0 } ?: 0
     /** Exactly one audible pane; none when backgrounded or in Android PiP. */
     fun volumes(
         audioPane: Int,

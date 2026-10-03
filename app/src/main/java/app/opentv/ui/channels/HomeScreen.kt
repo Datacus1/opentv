@@ -298,7 +298,7 @@ fun HomeScreen(
     // ---- Live preview player -----------------------------------------------------------------
     // The guide and full-screen destination share this controller. Only the PlayerView changes,
     // so returning to the current channel can retain its decoder, media item and buffered data.
-    val previewController = liveSession.controller
+    val previewController by liveSession.controllers.collectAsState()
     DisposableEffect(Unit) {
         liveSession.attach(LivePlaybackSession.Surface.GUIDE)
         previewController.disableText()
@@ -324,7 +324,7 @@ fun HomeScreen(
 
     val lifecycleOwner = LocalLifecycleOwner.current
     var screenResumed by remember { mutableStateOf(true) }
-    DisposableEffect(lifecycleOwner) {
+    DisposableEffect(lifecycleOwner, previewController) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_RESUME -> {
@@ -361,7 +361,7 @@ fun HomeScreen(
     }
 
     // Preview audio follows the setting. It defaults on so Back keeps the current channel audible.
-    LaunchedEffect(previewSound, screenResumed) {
+    LaunchedEffect(previewSound, screenResumed, previewController) {
         if (screenResumed) previewController.player.volume = if (previewSound) 1f else 0f
     }
 

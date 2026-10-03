@@ -444,6 +444,10 @@
     <string name="split_expand">Ampliar imagen</string>
     <string name="split_two_pictures">Dos imágenes</string>
     <string name="split_exit">Salir de pantalla dividida</string>
+    <string name="split_keep_left">Mantener canal izquierdo a pantalla completa</string>
+    <string name="split_keep_right">Mantener canal derecho a pantalla completa</string>
+    <string name="split_recording_blocked">El segundo canal se desactiva durante una grabación para proteger su conexión con el proveedor.</string>
+    <string name="split_recording_stopped">Una grabación cerró el segundo canal. Elígelo de nuevo cuando termine la grabación.</string>
     <string name="split_connection_note">Dos canales usan dos conexiones del proveedor. Las grabaciones usan conexiones adicionales.</string>
     <string name="split_audible_title">%1$s · Audio</string>
     <string name="split_playback_error">No se pudo reproducir este canal. Prueba otro o comprueba las conexiones permitidas por tu proveedor.</string>

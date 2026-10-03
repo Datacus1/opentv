@@ -9,8 +9,10 @@ package app.opentv.ui.player
 internal class SplitScreenAudioRouter(private val setPrimaryVolume: (Float) -> Unit) {
     private var setSecondaryVolume: ((Float) -> Unit)? = null
     private var requested = 1f to 0f
+    private var closed = false
 
     fun attachSecondary(setVolume: (Float) -> Unit) {
+        if (closed) return
         setSecondaryVolume?.invoke(0f)
         setSecondaryVolume = setVolume
         applyVolumes()
@@ -23,8 +25,17 @@ internal class SplitScreenAudioRouter(private val setPrimaryVolume: (Float) -> U
     }
 
     fun route(volumes: Pair<Float, Float>) {
+        if (closed) return
         requested = volumes
         applyVolumes()
+    }
+
+    /** Terminal shutdown before promotion/disposal; delayed effects cannot unmute old outputs. */
+    fun close() {
+        if (closed) return
+        setPrimaryVolume(0f)
+        detachSecondary()
+        closed = true
     }
 
     private fun applyVolumes() {

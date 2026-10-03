@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
@@ -37,7 +38,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,6 +46,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -78,6 +79,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import androidx.compose.runtime.withFrameNanos
+
+private class SplitPickerState {
+    var query by mutableStateOf("")
+    var categoryKey by mutableStateOf<Pair<Long, String>?>(null)
+    var favouritesOnly by mutableStateOf(false)
+    var focusedChannelId: Long? = null
+    var selectedContext: List<Channel> = emptyList()
+    val channelScroll = LazyListState()
+    val categoryScroll = LazyListState()
+}
 
 /** Two in-app pictures. The existing live session stays the primary; only one extra player exists. */
 @OptIn(UnstableApi::class)
@@ -87,16 +99,28 @@ internal fun SplitScreenPlayer(
     primaryChannelId: Long?,
     onExit: () -> Unit,
     onGuide: () -> Unit,
+    onKeepSecondary: (Channel, PlayerController, List<Channel>) -> Unit,
 ) {
     val graph = ServiceLocator.get(LocalContext.current)
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var foreground by remember { mutableStateOf(lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) }
     var audioPane by remember { mutableIntStateOf(0) }
+    var selectedPane by remember { mutableIntStateOf(0) }
     var expandedPane by remember { mutableStateOf<Int?>(null) }
     var secondaryChannel by remember { mutableStateOf<Channel?>(null) }
     var primaryChannel by remember { mutableStateOf<Channel?>(null) }
     var picker by remember { mutableStateOf(false) }
     val initialFocus = remember { FocusRequester() }
+    val pickerState = remember { SplitPickerState() }
+    val recordings by graph.recordingRepository.observeActive().collectAsState(initial = null)
+    val mayOpenSecondary = SplitScreenPolicy.mayOpenSecondary(recordings?.size)
+    var recordingBlocked by remember { mutableStateOf(false) }
+    var secondaryController by remember { mutableStateOf<PlayerController?>(null) }
+    val idleSecondary = remember { kotlinx.coroutines.flow.MutableStateFlow<PlayerController.State>(PlayerController.State.Idle) }
+    val secondaryState by (secondaryController?.state ?: idleSecondary).collectAsState()
+    var secondaryTransferred by remember { mutableStateOf(false) }
+    var primaryRetry by remember { mutableIntStateOf(0) }
+    var primaryResolveError by remember { mutableStateOf(false) }
     val primaryState by primary.state.collectAsState()
     val audioRouter = remember(primary) { SplitScreenAudioRouter { primary.player.volume = it } }
     val primaryTitle = when (val value = primaryState) {
@@ -120,13 +144,45 @@ internal fun SplitScreenPlayer(
     val volumes = SplitScreenPolicy.volumes(audioPane, expandedPane, secondaryChannel != null, foreground && !inPip)
     LaunchedEffect(volumes) { audioRouter.route(volumes) }
     DisposableEffect(primary, lifecycle) {
+        primary.setMultiviewActive(true)
         onDispose {
-            primary.player.volume = if (PipState.inPip.value ||
+            audioRouter.close()
+            if (graph.livePlaybackSession.controller === primary) {
+                primary.setMultiviewActive(false)
+                primary.player.volume = if (PipState.inPip.value ||
                 !lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
             ) 0f else 1f
+            }
         }
     }
-    LaunchedEffect(Unit) { initialFocus.requestFocus() }
+    var placed by remember { mutableStateOf(false) }
+    LaunchedEffect(picker, placed) {
+        if (!picker && placed) { withFrameNanos { }; runCatching { initialFocus.requestFocus() } }
+    }
+    LaunchedEffect(mayOpenSecondary) {
+        if (recordings?.isNotEmpty() == true) {
+            secondaryChannel = null
+            audioPane = 0
+            selectedPane = 0
+            expandedPane = null
+            recordingBlocked = true
+            picker = false
+        }
+    }
+    LaunchedEffect(primaryRetry) {
+        if (primaryRetry == 0) return@LaunchedEffect
+        primaryResolveError = false
+        primary.stop()
+        try {
+            val channel = primaryChannelId?.let { graph.catalogRepository.channel(it) }
+                ?: error("Missing channel")
+            val source = graph.sourceRepository.byId(channel.sourceId) ?: error("Missing source")
+            val url = graph.catalogRepository.resolvePlaybackUrl(channel, source)
+            ensureActive()
+            primary.play(PlayerController.Request(url, channel.shownName, source.userAgent ?: "OpenTV/0.1 (Android)", channelId = channel.id), debounce = false)
+        } catch (e: CancellationException) { throw e }
+        catch (_: Exception) { primaryResolveError = true }
+    }
 
     fun back() {
         if (picker) picker = false
@@ -153,8 +209,11 @@ internal fun SplitScreenPlayer(
                     controller = primary,
                     title = primaryTitle,
                     audible = volumes.first > 0f,
-                    onFocus = { audioPane = 0 },
-                    onExpand = { expandedPane = if (expandedPane == 0) null else 0 },
+                    onFocus = { selectedPane = 0 },
+                    onExpand = { selectedPane = 0; audioPane = 0; expandedPane = if (expandedPane == 0) null else 0 },
+                    onRetry = { primaryRetry++ },
+                    resolveError = primaryResolveError,
+                    onViewReleased = { graph.livePlaybackSession.releaseRetiredController(primary) },
                     visible = expandedPane != 1,
                 )
             }
@@ -165,39 +224,61 @@ internal fun SplitScreenPlayer(
                 val channel = secondaryChannel
                 if (channel == null) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Button(onClick = { picker = true }) { Text(stringResource(R.string.split_choose_second)) }
+                        Button(enabled = mayOpenSecondary, onClick = { picker = true; recordingBlocked = false }) { Text(stringResource(R.string.split_choose_second)) }
                     }
-                } else if (foreground) {
+                } else if (foreground && !inPip && mayOpenSecondary) {
                     SecondaryPane(
                         channel = channel,
                         audioRouter = audioRouter,
                         audible = volumes.second > 0f,
                         visible = expandedPane != 0,
-                        onFocus = { audioPane = 1 },
-                        onExpand = { expandedPane = if (expandedPane == 1) null else 1 },
+                        onFocus = { selectedPane = 1 },
+                        onExpand = { selectedPane = 1; audioPane = 1; expandedPane = if (expandedPane == 1) null else 1 },
+                        onController = { secondaryController = it },
+                        transferred = { secondaryTransferred },
                     )
                 }
             }
         }
         Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(onClick = { picker = true }, modifier = Modifier.focusRequester(initialFocus)) {
+                Button(enabled = mayOpenSecondary, onClick = { picker = true; recordingBlocked = false }) {
                     Text(stringResource(if (secondaryChannel == null) R.string.split_choose_second else R.string.split_change_second))
                 }
-                Button(onClick = { audioPane = 0; expandedPane = null }) {
+                Button(onClick = { selectedPane = 0; audioPane = 0; if (expandedPane != null) expandedPane = 0 }) {
                     Text(stringResource(R.string.split_left_audio))
                 }
                 Button(
-                    onClick = { audioPane = 1; expandedPane = null },
+                    onClick = { selectedPane = 1; audioPane = 1; if (expandedPane != null) expandedPane = 1 },
                     enabled = secondaryChannel != null,
                 ) { Text(stringResource(R.string.split_right_audio)) }
-                Button(onClick = { expandedPane = if (expandedPane == null) audioPane else null }) {
+                Button(onClick = { audioPane = selectedPane; expandedPane = if (expandedPane == null) selectedPane else null }, enabled = selectedPane == 0 || secondaryChannel != null) {
                     Text(stringResource(if (expandedPane == null) R.string.split_expand else R.string.split_two_pictures))
                 }
-                Button(onClick = onExit) { Text(stringResource(R.string.split_exit)) }
+                Button(
+                    enabled = selectedPane == 0 || (secondaryState is PlayerController.State.Playing &&
+                        secondaryChannel?.let { secondaryController?.isReadyChannel(it.id) } == true),
+                    onClick = {
+                        if (selectedPane == 0) onExit()
+                        else {
+                            val channel = secondaryChannel
+                            val extra = secondaryController
+                            if (channel != null && extra != null && extra.isReadyChannel(channel.id)) {
+                                audioRouter.close()
+                                secondaryTransferred = true
+                                onKeepSecondary(channel, extra, pickerState.selectedContext)
+                            }
+                        }
+                    },
+                ) { Text(stringResource(if (selectedPane == 0) R.string.split_keep_left else R.string.split_keep_right)) }
+                Button(onClick = onExit, modifier = Modifier.focusRequester(initialFocus).onGloballyPositioned { placed = true }) { Text(stringResource(R.string.split_exit)) }
             }
             Text(
-                stringResource(R.string.split_connection_note),
+                stringResource(when {
+                    !mayOpenSecondary -> R.string.split_recording_blocked
+                    recordingBlocked -> R.string.split_recording_stopped
+                    else -> R.string.split_connection_note
+                }),
                 color = Color.LightGray,
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -207,10 +288,14 @@ internal fun SplitScreenPlayer(
         SplitChannelPicker(
             primaryChannel = primaryChannel,
             primaryChannelId = primaryChannelId,
+            saved = pickerState,
             onDismiss = { picker = false },
             onSelect = {
-                secondaryChannel = it
-                expandedPane = null
+                if (mayOpenSecondary) {
+                    secondaryChannel = it
+                    selectedPane = 1
+                    expandedPane = null
+                }
                 picker = false
             },
         )
@@ -226,37 +311,37 @@ private fun SecondaryPane(
     visible: Boolean,
     onFocus: () -> Unit,
     onExpand: () -> Unit,
+    onController: (PlayerController?) -> Unit,
+    transferred: () -> Boolean,
 ) {
     val context = LocalContext.current
     val graph = remember { ServiceLocator.get(context) }
-    val scope = rememberCoroutineScope()
     // Reused on channel changes, disposed immediately on background/PiP/exit/navigation.
     val controller = remember {
-        PlayerController(
-            context = context,
-            scope = scope,
-            httpClient = graph.streamingHttpClient,
-            subtitlesEnabled = false,
-            dvr = false,
-            multiview = true,
-        ).apply { player.volume = 0f }
+        graph.livePlaybackSession.createSecondaryController().apply { player.volume = 0f }
     }
     var resolveError by remember { mutableStateOf(false) }
+    var retry by remember { mutableIntStateOf(0) }
     DisposableEffect(controller, audioRouter) {
         audioRouter.attachSecondary { controller.player.volume = it }
+        onController(controller)
         onDispose {
             audioRouter.detachSecondary()
-            controller.release()
+            onController(null)
+            if (!transferred()) controller.release()
         }
     }
-    LaunchedEffect(channel.id) {
+    LaunchedEffect(channel.id, retry) {
         resolveError = false
         // Stop the replaced stream before minting a Stalker URL; keep just two connections.
         controller.stop()
         try {
-            val source = graph.sourceRepository.byId(channel.sourceId)
+            if (graph.recordingRepository.observeActive().first().isNotEmpty()) return@LaunchedEffect
+            val source = graph.sourceRepository.byId(channel.sourceId) ?: error("Missing source")
+            check(source.enabled)
             val url = graph.catalogRepository.resolvePlaybackUrl(channel, source)
             ensureActive()
+            if (graph.recordingRepository.observeActive().first().isNotEmpty()) return@LaunchedEffect
             controller.play(
                 PlayerController.Request(
                     url = url,
@@ -281,6 +366,7 @@ private fun SecondaryPane(
         onExpand = onExpand,
         resolveError = resolveError,
         visible = visible,
+        onRetry = { retry++ },
     )
 }
 
@@ -294,6 +380,8 @@ private fun VideoPane(
     onExpand: () -> Unit,
     resolveError: Boolean = false,
     visible: Boolean = true,
+    onRetry: () -> Unit = { controller.retry() },
+    onViewReleased: () -> Unit = {},
 ) {
     val state by controller.state.collectAsState()
     var focused by remember { mutableStateOf(false) }
@@ -316,7 +404,7 @@ private fun VideoPane(
                     descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
                 }
             },
-            onRelease = { it.player = null },
+            onRelease = { it.player = null; onViewReleased() },
         )
         Text(
             if (audible) stringResource(R.string.split_audible_title, title) else title,
@@ -334,9 +422,7 @@ private fun VideoPane(
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text(stringResource(R.string.split_playback_error), color = Color.White)
-                if (!resolveError) {
-                    Button(onClick = { controller.retry() }) { Text(stringResource(R.string.common_try_again)) }
-                }
+                Button(enabled = visible, onClick = onRetry) { Text(stringResource(R.string.common_try_again)) }
             }
         }
     }
@@ -346,6 +432,7 @@ private fun VideoPane(
 private fun SplitChannelPicker(
     primaryChannel: Channel?,
     primaryChannelId: Long?,
+    saved: SplitPickerState,
     onSelect: (Channel) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -356,10 +443,15 @@ private fun SplitChannelPicker(
     var categories by remember { mutableStateOf<List<Category>>(emptyList()) }
     var loaded by remember { mutableStateOf(false) }
     var loadError by remember { mutableStateOf(false) }
-    var query by remember { mutableStateOf("") }
-    var categoryKey by remember { mutableStateOf<Pair<Long, String>?>(null) }
-    var favouritesOnly by remember { mutableStateOf(false) }
+    var query by saved::query
+    var categoryKey by saved::categoryKey
+    var favouritesOnly by saved::favouritesOnly
     val initialFocus = remember { FocusRequester() }
+    var initialPlaced by remember { mutableStateOf(false) }
+    var focusArea by remember { mutableStateOf("rail") }
+    var focusChannel by remember { mutableStateOf<Long?>(null) }
+    var focusTicket by remember { mutableIntStateOf(0) }
+    var initialRestore by remember { mutableStateOf(true) }
     val repeatGate = remember { GuideDirectionRepeatGate() }
     LaunchedEffect(Unit) {
         try {
@@ -377,8 +469,10 @@ private fun SplitChannelPicker(
     }
     val visibleCategoryKeys = remember(visibleCategories) { visibleCategories.map { it.sourceId to it.id }.toSet() }
     var choices by remember { mutableStateOf<List<Channel>>(emptyList()) }
-    LaunchedEffect(channels, visibleCategoryKeys, categoryKey, favouritesOnly, query, primaryChannel, primaryChannelId) {
-        choices = withContext(Dispatchers.Default) {
+    LaunchedEffect(channels, loaded, visibleCategoryKeys, categoryKey, favouritesOnly, query, primaryChannel, primaryChannelId) {
+        if (!loaded) return@LaunchedEffect
+        if (categoryKey != null && categoryKey !in visibleCategoryKeys) categoryKey = null
+        val updated = withContext(Dispatchers.Default) {
             SplitScreenPolicy.choices(channels.filter {
                 (it.categoryId == null || (it.sourceId to it.categoryId) in visibleCategoryKeys) &&
                     (categoryKey == null || (it.sourceId to it.categoryId) == categoryKey) &&
@@ -386,9 +480,28 @@ private fun SplitChannelPicker(
             }, primaryChannel ?: channels.firstOrNull { it.id == primaryChannelId })
                 .filter { !favouritesOnly || it.favourite }
         }
+        choices = updated
+        if ((initialRestore && saved.focusedChannelId != null) || focusArea == "channels") {
+            if (updated.isNotEmpty()) {
+                val index = SplitScreenPolicy.restoredChannelIndex(updated.map { it.id }, saved.focusedChannelId)
+                saved.channelScroll.scrollToItem(index)
+                focusChannel = updated[index].id
+                focusTicket++
+            } else {
+                focusArea = "rail"
+                focusChannel = null
+                withFrameNanos { }
+                runCatching { initialFocus.requestFocus() }
+            }
+        }
+        initialRestore = false
     }
     // Start in the stable category rail so a TV remote can browse without opening the keyboard.
-    LaunchedEffect(Unit) { initialFocus.requestFocus() }
+    LaunchedEffect(initialPlaced) {
+        if (initialPlaced) {
+            withFrameNanos { }; runCatching { initialFocus.requestFocus() }
+        }
+    }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(
             Modifier.fillMaxWidth(0.92f).fillMaxHeight(0.90f).background(MaterialTheme.colorScheme.surface)
@@ -409,27 +522,27 @@ private fun SplitChannelPicker(
                 onValueChange = { query = it },
                 label = { Text(stringResource(R.string.split_search_channels)) },
                 singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().onFocusChanged { if (it.isFocused) focusArea = "search" },
             )
             Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                LazyColumn(Modifier.width(220.dp).fillMaxHeight()) {
-                    item {
-                        PickerRow(
-                            stringResource(R.string.guide_all_channels),
-                            categoryKey == null && !favouritesOnly,
-                            focusRequester = initialFocus,
-                        ) {
-                            categoryKey = null; favouritesOnly = false
-                        }
+                Column(Modifier.width(220.dp).fillMaxHeight()) {
+                    PickerRow(
+                        stringResource(R.string.guide_all_channels),
+                        categoryKey == null && !favouritesOnly,
+                        focusRequester = initialFocus,
+                        onPlaced = { initialPlaced = true },
+                        onFocused = { focusArea = "rail" },
+                    ) {
+                        categoryKey = null; favouritesOnly = false
                     }
-                    item {
-                        PickerRow(stringResource(R.string.guide_favourites), favouritesOnly) {
-                            categoryKey = null; favouritesOnly = true
-                        }
+                    PickerRow(stringResource(R.string.guide_favourites), favouritesOnly, onFocused = { focusArea = "rail" }) {
+                        categoryKey = null; favouritesOnly = true
                     }
-                    itemsIndexed(visibleCategories, key = { _, it -> "${it.sourceId}:${it.id}" }) { _, category ->
-                        PickerRow(category.name, categoryKey == (category.sourceId to category.id)) {
-                            categoryKey = category.sourceId to category.id; favouritesOnly = false
+                    LazyColumn(state = saved.categoryScroll, modifier = Modifier.weight(1f)) {
+                        itemsIndexed(visibleCategories, key = { _, it -> "${it.sourceId}:${it.id}" }) { _, category ->
+                            PickerRow(category.name, categoryKey == (category.sourceId to category.id), onFocused = { focusArea = "rail" }) {
+                                categoryKey = category.sourceId to category.id; favouritesOnly = false
+                            }
                         }
                     }
                 }
@@ -438,14 +551,22 @@ private fun SplitChannelPicker(
                 } else if (choices.isEmpty()) {
                     Text(stringResource(if (loadError) R.string.split_catalogue_error else R.string.split_no_channels))
                 } else {
-                    LazyColumn(Modifier.weight(1f).fillMaxHeight()) {
+                    LazyColumn(state = saved.channelScroll, modifier = Modifier.weight(1f).fillMaxHeight()) {
                         itemsIndexed(choices, key = { _, channel -> channel.id }) { _, channel ->
-                            PickerRow(channel.shownName, false) { onSelect(channel) }
+                            PickerRow(
+                                channel.shownName, false,
+                                focusTicket = if (focusChannel == channel.id) focusTicket else 0,
+                                onFocused = { saved.focusedChannelId = channel.id; focusArea = "channels"; focusChannel = null },
+                            ) {
+                                saved.focusedChannelId = channel.id
+                                saved.selectedContext = choices
+                                onSelect(channel)
+                            }
                         }
                     }
                 }
             }
-            Button(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
+            Button(onClick = onDismiss, modifier = Modifier.onFocusChanged { if (it.isFocused) focusArea = "cancel" }) { Text(stringResource(R.string.common_cancel)) }
         }
     }
 }
@@ -455,14 +576,23 @@ private fun PickerRow(
     label: String,
     selected: Boolean,
     focusRequester: FocusRequester? = null,
+    focusTicket: Int = 0,
+    onPlaced: () -> Unit = {},
+    onFocused: () -> Unit = {},
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
+    val ownRequester = remember { FocusRequester() }
+    var placed by remember { mutableStateOf(false) }
+    LaunchedEffect(focusTicket, placed) {
+        if (focusTicket > 0 && placed) { withFrameNanos { }; runCatching { ownRequester.requestFocus() } }
+    }
     Text(
         label,
         modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)
-            .then(if (focusRequester == null) Modifier else Modifier.focusRequester(focusRequester))
-            .onFocusChanged { focused = it.isFocused }
+            .focusRequester(focusRequester ?: ownRequester)
+            .onGloballyPositioned { placed = true; onPlaced() }
+            .onFocusChanged { focused = it.isFocused; if (it.isFocused) onFocused() }
             .background(
                 when {
                     focused -> MaterialTheme.colorScheme.primary

@@ -1,0 +1,6 @@
+// Optional local build outputs outside OneDrive; source and credentials remain untouched.
+def outputRoot = System.getenv('OPENTV_OFFLINE_BUILD_DIR')
+if (!outputRoot) throw new GradleException('Set OPENTV_OFFLINE_BUILD_DIR to an empty local build-output directory.')
+gradle.beforeProject { project ->
+    project.layout.buildDirectory.set(new File(outputRoot, project.path == ':' ? 'root' : project.path.substring(1).replace(':', '/')))
+}

@@ -27,9 +27,9 @@ import okhttp3.OkHttpClient
  * destinations; leaving live TV for any unrelated screen still stops immediately.
  */
 class LivePlaybackSession(
-    context: Context,
-    httpClient: OkHttpClient,
-    settings: AppSettings,
+    private val context: Context,
+    private val httpClient: OkHttpClient,
+    private val settings: AppSettings,
 ) {
     enum class Surface { GUIDE, PLAYER }
 
@@ -38,13 +38,40 @@ class LivePlaybackSession(
     private var pendingHandoff: Surface? = null
     private var handoffExpiryJob: Job? = null
 
-    val controller = PlayerController(
+    private val currentController = kotlinx.coroutines.flow.MutableStateFlow(PlayerController(
         context = context,
         scope = scope,
         httpClient = httpClient,
         subtitlesEnabled = settings.subtitlesEnabled.value,
         dvr = settings.livePauseEnabled.value,
+    ))
+    val controllers: kotlinx.coroutines.flow.StateFlow<PlayerController> = currentController
+    val controller: PlayerController get() = currentController.value
+    private var retiredController: PlayerController? = null
+
+    /** Session-owned scope survives disposal of the split-screen UI when this pane is promoted. */
+    fun createSecondaryController(): PlayerController = PlayerController(
+        context, scope, httpClient, subtitlesEnabled = false,
+        dvr = settings.livePauseEnabled.value, multiview = true,
     )
+
+    /** Move the already-prepared second player into the shared guide/full-screen session. */
+    fun promoteSecondary(secondary: PlayerController) {
+        check(secondary !== controller)
+        retiredController?.release()
+        retiredController = controller.also { it.player.volume = 0f; it.stop() }
+        secondary.setMultiviewActive(false)
+        currentController.value = secondary
+        active.set(true)
+    }
+
+    /** The retiring PlayerView detaches its surface before releasing the old decoder. */
+    fun releaseRetiredController(detached: PlayerController) {
+        if (retiredController === detached) {
+            retiredController = null
+            detached.release()
+        }
+    }
 
     fun attach(surface: Surface) {
         attachedSurfaces += surface

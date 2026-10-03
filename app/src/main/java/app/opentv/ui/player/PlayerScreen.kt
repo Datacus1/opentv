@@ -137,7 +137,7 @@ fun PlayerScreen(
     val scope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
     val subtitlesDefault by settings.subtitlesEnabled.collectAsState()
     val liveSession = remember { graph.livePlaybackSession }
-    val controller = liveSession.controller
+    val controller by liveSession.controllers.collectAsState()
     val state by controller.state.collectAsState()
     val tracks by controller.tracks.collectAsState()
     // What's recording right now, so the Record button can show as armed for this channel.
@@ -198,7 +198,7 @@ fun PlayerScreen(
     // A second media app cannot mute OpenTV through audio focus because PlayerController does
     // not opt in to ExoPlayer's audio-focus handling. Keep the live stream advancing in PiP,
     // but give the foreground app exclusive audible playback until OpenTV is expanded again.
-    LaunchedEffect(inPip) { controller.player.volume = if (inPip) 0f else 1f }
+    LaunchedEffect(inPip, controller) { controller.player.volume = if (inPip) 0f else 1f }
     // A commercial break retains only the original live stream in Android PiP. Disposing the
     // split screen releases the extra decoder/connection before SmartTube starts playback.
     LaunchedEffect(inPip) { if (inPip) splitScreen = false }
@@ -209,7 +209,7 @@ fun PlayerScreen(
 
     // The channel list you were browsing, for channel up/down and the in-player list. Snapshotted
     // on entry so it doesn't shift under you mid-session.
-    val queue = remember { PlaybackQueue.items }
+    var queue by remember { mutableStateOf(PlaybackQueue.items) }
 
     fun reveal() {
         controlsVisible = true
@@ -279,7 +279,7 @@ fun PlayerScreen(
 
     // The guide suppresses captions in its small preview. Re-apply the full-screen preference even
     // when the same prepared media item is handed over and its tracks therefore do not change.
-    LaunchedEffect(subtitlesDefault) {
+    LaunchedEffect(subtitlesDefault, controller) {
         if (subtitlesDefault) controller.setSubtitlesEnabled(true) else controller.disableText()
     }
 
@@ -352,6 +352,24 @@ fun PlayerScreen(
             primary = controller,
             primaryChannelId = currentId,
             onExit = { splitScreen = false; reveal() },
+            onKeepSecondary = { channel, secondary, contextChannels ->
+                previousId = currentId
+                currentId = channel.id
+                settings.lastChannelId = channel.id
+                variants = listOf(channel)
+                queue = contextChannels.ifEmpty { listOf(channel) }.map {
+                    PlaybackQueue.Item(it.id, it.shownName, it.logoUrl, it.number)
+                }
+                PlaybackQueue.items = queue
+                paused = false
+                liveSession.promoteSecondary(secondary)
+                splitScreen = false
+                reveal()
+                scope.launch {
+                    val updated = graph.catalogRepository.variants(channel)
+                    if (currentId == channel.id) variants = updated
+                }
+            },
             onGuide = {
                 liveSession.prepareHandoff(LivePlaybackSession.Surface.GUIDE)
                 onBack()
@@ -589,6 +607,8 @@ fun PlayerScreen(
                         BarChip(Icons.Filled.ViewWeek, stringResource(R.string.split_screen), false) {
                             panel = Panel.NONE
                             channelListVisible = false
+                            paused = false
+                            controller.player.playWhenReady = true
                             splitScreen = true
                         }
                     }

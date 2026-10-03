@@ -3,11 +3,66 @@ package app.opentv
 import app.opentv.data.model.Channel
 import app.opentv.ui.player.SplitScreenAudioRouter
 import app.opentv.ui.player.SplitScreenPolicy
+import app.opentv.player.LiveOffsetLearningPolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SplitScreenPolicyTest {
+    @Test
+    fun `recording guard fails closed while loading or recording`() {
+        assertTrue(!SplitScreenPolicy.mayOpenSecondary(null))
+        assertTrue(!SplitScreenPolicy.mayOpenSecondary(1))
+        assertTrue(!SplitScreenPolicy.mayOpenSecondary(3))
+        assertTrue(SplitScreenPolicy.mayOpenSecondary(0))
+    }
+
+    @Test
+    fun `picker restores a surviving channel and falls back safely after filtering`() {
+        assertEquals(1, SplitScreenPolicy.restoredChannelIndex(listOf(10L, 20L, 30L), 20L))
+        assertEquals(0, SplitScreenPolicy.restoredChannelIndex(listOf(10L, 30L), 20L))
+        assertEquals(0, SplitScreenPolicy.restoredChannelIndex(emptyList(), 20L))
+        assertEquals(0, SplitScreenPolicy.restoredChannelIndex(listOf(10L), null))
+    }
+
+    @Test
+    fun `multiview congestion cannot persist into single-channel learning`() {
+        val learning = LiveOffsetLearningPolicy()
+        assertTrue(learning.mayPersist)
+        learning.setMultiview(true)
+        assertTrue(!learning.mayPersist)
+        learning.beginTune()
+        assertTrue(!learning.mayPersist)
+        learning.setMultiview(false)
+        assertTrue(!learning.mayPersist)
+        learning.beginTune()
+        assertTrue(learning.mayPersist)
+        val extra = LiveOffsetLearningPolicy(true)
+        extra.beginTune()
+        assertTrue(!extra.mayPersist)
+        extra.setMultiview(false)
+        assertTrue(!extra.mayPersist)
+        extra.beginTune()
+        assertTrue(extra.mayPersist)
+    }
+
+    @Test
+    fun `closed audio router cannot touch transferred or retired players`() {
+        var left = 1f
+        var right = 0f
+        var retired = false
+        val router = SplitScreenAudioRouter { check(!retired); left = it }
+        router.attachSecondary { check(!retired); right = it }
+        router.route(0f to 1f)
+        router.close()
+        assertEquals(0f to 0f, left to right)
+        retired = true
+        router.route(1f to 0f)
+        router.attachSecondary { error("A closed router cannot reattach a player") }
+        router.close()
+        router.detachSecondary()
+    }
+
     @Test
     fun `every focus expansion and lifecycle combination has at most one audible pane`() {
         for (audio in 0..1) for (expanded in listOf(null, 0, 1)) {
