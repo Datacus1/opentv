@@ -6,9 +6,31 @@
 package app.opentv.ui.player
 
 import app.opentv.data.model.Channel
+import app.opentv.data.model.Programme
 import app.opentv.data.parser.ChannelNameNormalizer
 
 internal object SplitScreenPolicy {
+    const val CONTROLS_TIMEOUT_MS = 5_000L
+
+    // Media3 AspectRatioFrameLayout: FIT=0, ZOOM=4. Keep this policy JVM-testable.
+    fun resizeMode(fillPictures: Boolean, expanded: Boolean): Int =
+        if (fillPictures && !expanded) 4 else 0
+
+    /** Match the main guide's override/provider/matched-id and sibling-variant fallback. */
+    fun currentProgrammes(
+        channels: List<Channel>, programmes: List<Programme>, nowMillis: Long,
+    ): Map<Pair<Long, String>, Programme> {
+        val byEpgId = programmes.filter { it.isLiveAt(nowMillis) }
+            .sortedWith(compareByDescending<Programme> { it.startUtcMillis }.thenBy { it.feedId })
+            .groupBy { it.epgChannelId }
+        return channels.filter { !it.hidden }.groupBy(::logicalKey).mapNotNull { (key, variants) ->
+            variants.sortedByDescending { it.qualityRank }.asSequence()
+                .flatMap { it.epgCandidates.asSequence() }
+                .firstNotNullOfOrNull { byEpgId[it]?.firstOrNull() }
+                ?.let { key to it }
+        }.toMap()
+    }
+
     fun mayOpenSecondary(recordingCount: Int?): Boolean = recordingCount == 0
 
     fun restoredChannelIndex(ids: List<Long>, lastFocusedId: Long?): Int =
@@ -44,5 +66,16 @@ internal object SplitScreenPolicy {
                 best.copy(favourite = variants.any { it.favourite })
             }
             .sortedWith(compareBy<Channel> { it.sortIndex }.thenBy { it.displayName })
+    }
+}
+
+/** Consume the whole wake-up press, including repeats/release, so it cannot expand a picture. */
+internal class SplitControlsWakeGuard {
+    private var downTime: Long? = null
+    fun start(time: Long) { downTime = time }
+    fun consumeTail(time: Long, up: Boolean): Boolean {
+        if (downTime != time) { downTime = null; return false }
+        if (up) downTime = null
+        return true
     }
 }

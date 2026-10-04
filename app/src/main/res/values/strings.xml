@@ -506,6 +506,11 @@
     <string name="settings_tmdb_saved">TMDB key saved</string>
     <string name="settings_tmdb_active">Active</string>
     <string name="split_screen">Split screen</string>
+    <string name="split_left_picture">Left picture</string>
+    <string name="split_right_picture">Right picture</string>
+    <string name="split_selected">Selected</string>
+    <string name="split_fill_pictures">Fill pictures (crop edges)</string>
+    <string name="split_fit_pictures">Fit pictures (show whole picture)</string>
     <string name="split_choose_second">Choose second channel</string>
     <string name="split_change_second">Change second channel</string>
     <string name="split_left_audio">Left audio</string>

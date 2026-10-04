@@ -3,6 +3,8 @@
  * Copyright (C) 2026 The OpenTV Contributors
  * Licensed under the GNU General Public License v3.0 or later.
  */
+@file:kotlin.OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+
 package app.opentv.ui.player
 
 import androidx.activity.compose.BackHandler
@@ -19,6 +21,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -26,6 +29,7 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -46,6 +50,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -63,21 +68,26 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import app.opentv.R
 import app.opentv.core.PipState
 import app.opentv.core.ServiceLocator
 import app.opentv.data.model.Category
 import app.opentv.data.model.Channel
+import app.opentv.data.model.Programme
 import app.opentv.data.model.shownName
 import app.opentv.data.parser.ChannelNameNormalizer
 import app.opentv.player.PlayerController
 import app.opentv.ui.channels.GuideDirectionRepeatGate
+import app.opentv.ui.channels.guideProgrammeLabel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.withFrameNanos
 
@@ -111,9 +121,18 @@ internal fun SplitScreenPlayer(
     var primaryChannel by remember { mutableStateOf<Channel?>(null) }
     var picker by remember { mutableStateOf(false) }
     val initialFocus = remember { FocusRequester() }
+    val chooseFocus = remember { FocusRequester() }
+    val leftAudioFocus = remember { FocusRequester() }
+    val paneFocus = remember { listOf(FocusRequester(), FocusRequester()) }
+    var fillPictures by remember { mutableStateOf(false) }
+    var controlsVisible by remember { mutableStateOf(true) }
+    var interaction by remember { mutableIntStateOf(0) }
+    var requestedFocus by remember { mutableStateOf("exit") }
+    val wakeGuard = remember { SplitControlsWakeGuard() }
     val pickerState = remember { SplitPickerState() }
     val recordings by graph.recordingRepository.observeActive().collectAsState(initial = null)
     val mayOpenSecondary = SplitScreenPolicy.mayOpenSecondary(recordings?.size)
+    val firstControlFocus = if (mayOpenSecondary) chooseFocus else leftAudioFocus
     var recordingBlocked by remember { mutableStateOf(false) }
     var secondaryController by remember { mutableStateOf<PlayerController?>(null) }
     val idleSecondary = remember { kotlinx.coroutines.flow.MutableStateFlow<PlayerController.State>(PlayerController.State.Idle) }
@@ -156,8 +175,21 @@ internal fun SplitScreenPlayer(
         }
     }
     var placed by remember { mutableStateOf(false) }
-    LaunchedEffect(picker, placed) {
-        if (!picker && placed) { withFrameNanos { }; runCatching { initialFocus.requestFocus() } }
+    LaunchedEffect(picker, placed, controlsVisible, requestedFocus, expandedPane) {
+        if (!picker) {
+            withFrameNanos { }
+            val target = if (!controlsVisible || requestedFocus == "pane") paneFocus[expandedPane ?: selectedPane]
+                else if (requestedFocus == "choose") firstControlFocus else initialFocus
+            if (!controlsVisible || placed) runCatching { target.requestFocus() }
+        }
+    }
+    LaunchedEffect(controlsVisible, interaction, picker, secondaryChannel) {
+        if (controlsVisible && !picker && secondaryChannel != null) {
+            delay(SplitScreenPolicy.CONTROLS_TIMEOUT_MS)
+            // Move focus before removing the focused toolbar; never leave focus on a removed node.
+            runCatching { paneFocus[expandedPane ?: selectedPane].requestFocus() }
+            controlsVisible = false
+        }
     }
     LaunchedEffect(mayOpenSecondary) {
         if (recordings?.isNotEmpty() == true) {
@@ -167,6 +199,8 @@ internal fun SplitScreenPlayer(
             expandedPane = null
             recordingBlocked = true
             picker = false
+            controlsVisible = true
+            requestedFocus = "exit"
         }
     }
     LaunchedEffect(primaryRetry) {
@@ -185,22 +219,47 @@ internal fun SplitScreenPlayer(
     }
 
     fun back() {
-        if (picker) picker = false
-        else if (expandedPane != null) expandedPane = null
+        if (picker) { picker = false; controlsVisible = true; requestedFocus = "exit" }
+        else if (expandedPane != null) { expandedPane = null; controlsVisible = false }
         else onGuide()
     }
+    fun openPicker() {
+        picker = true; recordingBlocked = false; requestedFocus = "exit"
+    }
+    fun expand(pane: Int) {
+        selectedPane = pane
+        audioPane = pane
+        expandedPane = if (expandedPane == pane) null else pane
+        requestedFocus = "pane"
+        controlsVisible = false
+    }
     BackHandler { back() }
-    Column(
+    Box(
         Modifier.fillMaxSize().background(Color.Black).onPreviewKeyEvent { event ->
             if (event.key == Key.Back || event.key == Key.Escape) {
                 if (event.type == KeyEventType.KeyUp) back()
                 true
-            } else false
+            } else if (wakeGuard.consumeTail(event.nativeKeyEvent.downTime, event.type == KeyEventType.KeyUp)) {
+                true
+            } else if (!controlsVisible && event.type == KeyEventType.KeyDown && event.key in listOf(
+                    Key.DirectionUp, Key.DirectionDown, Key.DirectionLeft, Key.DirectionRight,
+                    Key.DirectionCenter, Key.Enter, Key.NumPadEnter,
+                )) {
+                // Waking the overlay must not also click/expand on the release of that press.
+                wakeGuard.start(event.nativeKeyEvent.downTime)
+                requestedFocus = if (event.key == Key.DirectionDown) "choose" else "pane"
+                controlsVisible = true
+                interaction++
+                true
+            } else {
+                if (event.type == KeyEventType.KeyDown) interaction++
+                false
+            }
         },
     ) {
         // Keep both PlayerViews in composition when expanded so their surfaces/buffers survive.
         // The hidden pane uses zero width. It keeps streaming while split-screen is active.
-        Row(Modifier.weight(1f).fillMaxWidth()) {
+        Row(Modifier.fillMaxSize()) {
             Box(
                 if (expandedPane == 1) Modifier.width(0.dp).fillMaxHeight()
                 else Modifier.weight(1f).fillMaxHeight(),
@@ -209,8 +268,17 @@ internal fun SplitScreenPlayer(
                     controller = primary,
                     title = primaryTitle,
                     audible = volumes.first > 0f,
+                    selected = selectedPane == 0,
+                    sideLabel = stringResource(R.string.split_left_picture),
+                    showOverlay = controlsVisible,
+                    focusRequester = paneFocus[0],
+                    controlsFocus = firstControlFocus,
+                    leftFocus = FocusRequester.Cancel,
+                    rightFocus = if (expandedPane != null) FocusRequester.Cancel
+                        else if (secondaryChannel == null) FocusRequester.Default else paneFocus[1],
+                    resizeMode = SplitScreenPolicy.resizeMode(fillPictures, expandedPane != null),
                     onFocus = { selectedPane = 0 },
-                    onExpand = { selectedPane = 0; audioPane = 0; expandedPane = if (expandedPane == 0) null else 0 },
+                    onExpand = { expand(0) },
                     onRetry = { primaryRetry++ },
                     resolveError = primaryResolveError,
                     onViewReleased = { graph.livePlaybackSession.releaseRetiredController(primary) },
@@ -224,38 +292,62 @@ internal fun SplitScreenPlayer(
                 val channel = secondaryChannel
                 if (channel == null) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Button(enabled = mayOpenSecondary, onClick = { picker = true; recordingBlocked = false }) { Text(stringResource(R.string.split_choose_second)) }
+                        SplitAction(enabled = mayOpenSecondary, label = stringResource(R.string.split_choose_second), onClick = { openPicker() })
                     }
                 } else if (foreground && !inPip && mayOpenSecondary) {
                     SecondaryPane(
                         channel = channel,
                         audioRouter = audioRouter,
                         audible = volumes.second > 0f,
+                        selected = selectedPane == 1,
+                        showOverlay = controlsVisible,
+                        focusRequester = paneFocus[1],
+                        controlsFocus = firstControlFocus,
+                        leftFocus = if (expandedPane != null) FocusRequester.Cancel else paneFocus[0],
+                        rightFocus = FocusRequester.Cancel,
+                        resizeMode = SplitScreenPolicy.resizeMode(fillPictures, expandedPane != null),
                         visible = expandedPane != 0,
                         onFocus = { selectedPane = 1 },
-                        onExpand = { selectedPane = 1; audioPane = 1; expandedPane = if (expandedPane == 1) null else 1 },
+                        onExpand = { expand(1) },
                         onController = { secondaryController = it },
                         transferred = { secondaryTransferred },
                     )
                 }
             }
         }
-        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(enabled = mayOpenSecondary, onClick = { picker = true; recordingBlocked = false }) {
-                    Text(stringResource(if (secondaryChannel == null) R.string.split_choose_second else R.string.split_change_second))
-                }
-                Button(onClick = { selectedPane = 0; audioPane = 0; if (expandedPane != null) expandedPane = 0 }) {
-                    Text(stringResource(R.string.split_left_audio))
-                }
-                Button(
+        if (controlsVisible) Column(
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Color.Black.copy(alpha = 0.92f)).padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Row(Modifier.horizontalScroll(rememberScrollState()).focusProperties {
+                up = paneFocus[expandedPane ?: selectedPane]
+            }, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                SplitAction(
+                    enabled = mayOpenSecondary,
+                    modifier = Modifier.focusRequester(chooseFocus),
+                    label = stringResource(if (secondaryChannel == null) R.string.split_choose_second else R.string.split_change_second),
+                    onClick = { openPicker() },
+                )
+                SplitAction(
+                    label = stringResource(R.string.split_left_audio), active = volumes.first > 0f,
+                    modifier = Modifier.focusRequester(leftAudioFocus),
+                    onClick = { selectedPane = 0; audioPane = 0; if (expandedPane != null) expandedPane = 0 },
+                )
+                SplitAction(
+                    label = stringResource(R.string.split_right_audio), active = volumes.second > 0f,
                     onClick = { selectedPane = 1; audioPane = 1; if (expandedPane != null) expandedPane = 1 },
                     enabled = secondaryChannel != null,
-                ) { Text(stringResource(R.string.split_right_audio)) }
-                Button(onClick = { audioPane = selectedPane; expandedPane = if (expandedPane == null) selectedPane else null }, enabled = selectedPane == 0 || secondaryChannel != null) {
-                    Text(stringResource(if (expandedPane == null) R.string.split_expand else R.string.split_two_pictures))
-                }
-                Button(
+                )
+                SplitAction(
+                    label = stringResource(if (expandedPane == null) R.string.split_expand else R.string.split_two_pictures),
+                    onClick = { expand(selectedPane) }, enabled = selectedPane == 0 || secondaryChannel != null,
+                )
+                SplitAction(
+                    label = stringResource(if (fillPictures) R.string.split_fit_pictures else R.string.split_fill_pictures),
+                    onClick = { fillPictures = !fillPictures },
+                )
+                SplitAction(
+                    label = stringResource(if (selectedPane == 0) R.string.split_keep_left else R.string.split_keep_right),
                     enabled = selectedPane == 0 || (secondaryState is PlayerController.State.Playing &&
                         secondaryChannel?.let { secondaryController?.isReadyChannel(it.id) } == true),
                     onClick = {
@@ -270,8 +362,8 @@ internal fun SplitScreenPlayer(
                             }
                         }
                     },
-                ) { Text(stringResource(if (selectedPane == 0) R.string.split_keep_left else R.string.split_keep_right)) }
-                Button(onClick = onExit, modifier = Modifier.focusRequester(initialFocus).onGloballyPositioned { placed = true }) { Text(stringResource(R.string.split_exit)) }
+                )
+                SplitAction(label = stringResource(R.string.split_exit), onClick = onExit, modifier = Modifier.focusRequester(initialFocus).onGloballyPositioned { placed = true })
             }
             Text(
                 stringResource(when {
@@ -289,7 +381,7 @@ internal fun SplitScreenPlayer(
             primaryChannel = primaryChannel,
             primaryChannelId = primaryChannelId,
             saved = pickerState,
-            onDismiss = { picker = false },
+            onDismiss = { picker = false; controlsVisible = true; interaction++; requestedFocus = "exit" },
             onSelect = {
                 if (mayOpenSecondary) {
                     secondaryChannel = it
@@ -297,9 +389,41 @@ internal fun SplitScreenPlayer(
                     expandedPane = null
                 }
                 picker = false
+                controlsVisible = true
+                interaction++
+                requestedFocus = "exit"
             },
         )
     }
+}
+
+/** Neutral actions; only actual remote focus is brightly filled and outlined. */
+@Composable
+private fun SplitAction(
+    label: String,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    active: Boolean = false,
+    onClick: () -> Unit,
+) {
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(8.dp)
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        shape = shape,
+        modifier = modifier.onFocusChanged { focused = it.isFocused }.border(
+            if (focused) 3.dp else 1.dp,
+            if (focused) Color.White else if (active) MaterialTheme.colorScheme.primary else Color.Transparent,
+            shape,
+        ),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if (focused) MaterialTheme.colorScheme.primary else Color(0xFF252932),
+            contentColor = if (focused) MaterialTheme.colorScheme.onPrimary else Color.White,
+            disabledContainerColor = Color(0xFF171A20),
+            disabledContentColor = Color.Gray,
+        ),
+    ) { Text(if (active) "✓ $label" else label) }
 }
 
 @OptIn(UnstableApi::class)
@@ -308,6 +432,13 @@ private fun SecondaryPane(
     channel: Channel,
     audioRouter: SplitScreenAudioRouter,
     audible: Boolean,
+    selected: Boolean,
+    showOverlay: Boolean,
+    focusRequester: FocusRequester,
+    controlsFocus: FocusRequester,
+    leftFocus: FocusRequester,
+    rightFocus: FocusRequester,
+    resizeMode: Int,
     visible: Boolean,
     onFocus: () -> Unit,
     onExpand: () -> Unit,
@@ -362,6 +493,14 @@ private fun SecondaryPane(
         controller = controller,
         title = channel.shownName,
         audible = audible,
+        selected = selected,
+        sideLabel = stringResource(R.string.split_right_picture),
+        showOverlay = showOverlay,
+        focusRequester = focusRequester,
+        controlsFocus = controlsFocus,
+        leftFocus = leftFocus,
+        rightFocus = rightFocus,
+        resizeMode = resizeMode,
         onFocus = onFocus,
         onExpand = onExpand,
         resolveError = resolveError,
@@ -376,6 +515,14 @@ private fun VideoPane(
     controller: PlayerController,
     title: String,
     audible: Boolean,
+    selected: Boolean,
+    sideLabel: String,
+    showOverlay: Boolean,
+    focusRequester: FocusRequester,
+    controlsFocus: FocusRequester,
+    leftFocus: FocusRequester,
+    rightFocus: FocusRequester,
+    resizeMode: Int,
     onFocus: () -> Unit,
     onExpand: () -> Unit,
     resolveError: Boolean = false,
@@ -387,8 +534,15 @@ private fun VideoPane(
     var focused by remember { mutableStateOf(false) }
     Box(
         Modifier.fillMaxSize()
-            .focusProperties { canFocus = visible }
-            .border(2.dp, if (focused) MaterialTheme.colorScheme.primary else Color.DarkGray)
+            .clipToBounds()
+            .focusRequester(focusRequester)
+            .focusProperties {
+                canFocus = visible
+                up = FocusRequester.Cancel
+                left = leftFocus
+                right = rightFocus
+                if (showOverlay) down = controlsFocus
+            }
             .onFocusChanged { focused = it.isFocused; if (it.isFocused) onFocus() }
             .clickable(enabled = visible, onClick = onExpand),
     ) {
@@ -398,21 +552,30 @@ private fun VideoPane(
                 PlayerView(context).apply {
                     player = controller.player
                     useController = false
-                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    this.resizeMode = resizeMode
                     isFocusable = false
                     isFocusableInTouchMode = false
                     descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
                 }
             },
+            update = { it.resizeMode = resizeMode },
             onRelease = { it.player = null; onViewReleased() },
         )
-        Text(
-            if (audible) stringResource(R.string.split_audible_title, title) else title,
-            Modifier.align(Alignment.TopStart).background(Color.Black.copy(alpha = 0.7f)).padding(10.dp),
-            color = Color.White,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        if (showOverlay) {
+            // Draw ABOVE the Android video surface so focus/selection is not hidden by it.
+            Box(Modifier.fillMaxSize().border(
+                if (focused) 4.dp else 3.dp,
+                if (focused) Color.White else if (selected) MaterialTheme.colorScheme.primary else Color.DarkGray,
+            ))
+            Text(
+                listOfNotNull(sideLabel, if (selected) stringResource(R.string.split_selected) else null,
+                    if (audible) stringResource(R.string.player_audio) else null).joinToString(" · ") + " — " + title,
+                Modifier.align(Alignment.TopStart).background(Color.Black.copy(alpha = 0.85f)).padding(10.dp),
+                color = Color.White,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
         if (state is PlayerController.State.Buffering || state == PlayerController.State.Idle && !resolveError) {
             CircularProgressIndicator(Modifier.align(Alignment.Center))
         }
@@ -422,7 +585,7 @@ private fun VideoPane(
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text(stringResource(R.string.split_playback_error), color = Color.White)
-                Button(enabled = visible, onClick = onRetry) { Text(stringResource(R.string.common_try_again)) }
+                SplitAction(enabled = visible, label = stringResource(R.string.common_try_again), onClick = onRetry)
             }
         }
     }
@@ -443,6 +606,8 @@ private fun SplitChannelPicker(
     var categories by remember { mutableStateOf<List<Category>>(emptyList()) }
     var loaded by remember { mutableStateOf(false) }
     var loadError by remember { mutableStateOf(false) }
+    var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
+    var nowProgrammes by remember { mutableStateOf<Map<Pair<Long, String>, Programme>>(emptyMap()) }
     var query by saved::query
     var categoryKey by saved::categoryKey
     var favouritesOnly by saved::favouritesOnly
@@ -454,11 +619,27 @@ private fun SplitChannelPicker(
     var initialRestore by remember { mutableStateOf(true) }
     val repeatGate = remember { GuideDirectionRepeatGate() }
     LaunchedEffect(Unit) {
+        while (true) {
+            delay(60_000)
+            nowMillis = System.currentTimeMillis()
+        }
+    }
+    LaunchedEffect(channels, nowMillis) {
+        if (channels.isEmpty()) return@LaunchedEffect
+        // One read-only current-programme query/index, not one query per channel or a new download.
+        graph.epgRepository.observeNow(nowMillis)
+            .map { SplitScreenPolicy.currentProgrammes(channels, it, nowMillis) }
+            .flowOn(Dispatchers.Default)
+            .collect { nowProgrammes = it }
+    }
+    LaunchedEffect(Unit) {
         try {
             val enabledSources = graph.sourceRepository.observeAll().first().filter { it.enabled }.map { it.id }.toSet()
-            channels = graph.catalogRepository.observeChannels().first().filter { it.sourceId in enabledSources }
             categories = graph.catalogRepository.liveCategories().filter { it.sourceId in enabledSources }
-            loaded = true
+            graph.catalogRepository.observeChannels().collect { updated ->
+                channels = updated.filter { it.sourceId in enabledSources }
+                loaded = true
+            }
         } catch (e: CancellationException) { throw e }
         catch (_: Exception) { loadError = true }
     }
@@ -553,8 +734,16 @@ private fun SplitChannelPicker(
                 } else {
                     LazyColumn(state = saved.channelScroll, modifier = Modifier.weight(1f).fillMaxHeight()) {
                         itemsIndexed(choices, key = { _, channel -> channel.id }) { _, channel ->
+                            val programme = nowProgrammes[SplitScreenPolicy.logicalKey(channel)]
+                                ?.takeIf { it.isLiveAt(nowMillis) }
+                            val timeFormat = remember { java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()) }
+                            val programmeText = programme?.let {
+                                "${timeFormat.format(java.util.Date(it.startUtcMillis))}–${timeFormat.format(java.util.Date(it.endUtcMillis))}  " +
+                                    guideProgrammeLabel(it.title, it.description).singleLineText
+                            } ?: stringResource(R.string.guide_no_info)
                             PickerRow(
                                 channel.shownName, false,
+                                detail = programmeText,
                                 focusTicket = if (focusChannel == channel.id) focusTicket else 0,
                                 onFocused = { saved.focusedChannelId = channel.id; focusArea = "channels"; focusChannel = null },
                             ) {
@@ -575,6 +764,7 @@ private fun SplitChannelPicker(
 private fun PickerRow(
     label: String,
     selected: Boolean,
+    detail: String? = null,
     focusRequester: FocusRequester? = null,
     focusTicket: Int = 0,
     onPlaced: () -> Unit = {},
@@ -587,8 +777,7 @@ private fun PickerRow(
     LaunchedEffect(focusTicket, placed) {
         if (focusTicket > 0 && placed) { withFrameNanos { }; runCatching { ownRequester.requestFocus() } }
     }
-    Text(
-        label,
+    Column(
         modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)
             .focusRequester(focusRequester ?: ownRequester)
             .onGloballyPositioned { placed = true; onPlaced() }
@@ -601,8 +790,17 @@ private fun PickerRow(
                 },
             )
             .clickable(onClick = onClick).padding(10.dp),
-        color = if (focused) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-    )
+    ) {
+        Text(label,
+            color = if (focused) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (detail != null) Text(detail,
+            color = if (focused) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
 }

@@ -1,6 +1,8 @@
 package app.opentv
 
 import app.opentv.data.model.Channel
+import app.opentv.data.model.Programme
+import app.opentv.ui.player.SplitControlsWakeGuard
 import app.opentv.ui.player.SplitScreenAudioRouter
 import app.opentv.ui.player.SplitScreenPolicy
 import app.opentv.player.LiveOffsetLearningPolicy
@@ -9,6 +11,61 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SplitScreenPolicyTest {
+    @Test
+    fun `fill halves can crop but expanded pictures always preserve the whole frame`() {
+        assertEquals(0, SplitScreenPolicy.resizeMode(false, false))
+        assertEquals(4, SplitScreenPolicy.resizeMode(true, false))
+        assertEquals(0, SplitScreenPolicy.resizeMode(false, true))
+        assertEquals(0, SplitScreenPolicy.resizeMode(true, true))
+    }
+
+    @Test
+    fun `waking controls consumes repeats and release but allows the next select`() {
+        val guard = SplitControlsWakeGuard()
+        assertTrue(!guard.consumeTail(10L, false))
+        guard.start(10L)
+        repeat(8) { assertTrue(guard.consumeTail(10L, false)) }
+        assertTrue(guard.consumeTail(10L, true))
+        assertTrue(!guard.consumeTail(20L, false))
+        assertTrue(!guard.consumeTail(20L, true))
+        guard.start(30L)
+        // A lost release must not swallow a fresh press forever.
+        assertTrue(!guard.consumeTail(40L, false))
+    }
+
+    @Test
+    fun `split guide uses populated override provider matched and sibling variant ids`() {
+        val high = channel(1, "ABC FHD", "abc", 300).copy(
+            epgOverrideId = "empty-override", epgChannelId = "empty-provider", matchedEpgId = "empty-match",
+        )
+        val low = channel(2, "ABC HD", "abc", 200).copy(epgChannelId = "abc")
+        val other = channel(3, "FOX HD", "fox", 200).copy(epgOverrideId = "override", epgChannelId = "provider")
+        val current = Programme(1, "abc", 100, 200, "Game")
+        val preferred = Programme(1, "override", 100, 200, "Override show")
+        val result = SplitScreenPolicy.currentProgrammes(listOf(high, low, other), listOf(
+            current, preferred, Programme(1, "provider", 100, 200, "Provider show"),
+        ), 150)
+        assertEquals(current, result[SplitScreenPolicy.logicalKey(high)])
+        assertEquals(preferred, result[SplitScreenPolicy.logicalKey(other)])
+    }
+
+    @Test
+    fun `split guide removes ended programmes advances at boundary and isolates providers`() {
+        val first = channel(1, "FOX HD", "fox", 200).copy(epgChannelId = "fox-one")
+        val second = first.copy(id = 2, sourceId = 2, epgChannelId = "fox-two")
+        val hidden = channel(3, "Hidden", "hidden", 100).copy(hidden = true, epgChannelId = "hidden")
+        val ended = Programme(1, "fox-one", 100, 200, "Old")
+        val next = Programme(1, "fox-one", 200, 300, "New")
+        val other = Programme(1, "fox-two", 100, 300, "Other provider")
+        val result = SplitScreenPolicy.currentProgrammes(listOf(first, second, hidden), listOf(
+            ended, next, other, Programme(1, "hidden", 100, 300, "Hidden show"),
+        ), 200)
+        assertEquals(next, result[SplitScreenPolicy.logicalKey(first)])
+        assertEquals(other, result[SplitScreenPolicy.logicalKey(second)])
+        assertEquals(2, result.size)
+        assertTrue(SplitScreenPolicy.currentProgrammes(listOf(first), listOf(ended), 200).isEmpty())
+    }
+
     @Test
     fun `recording guard fails closed while loading or recording`() {
         assertTrue(!SplitScreenPolicy.mayOpenSecondary(null))

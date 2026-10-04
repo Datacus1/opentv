@@ -1,9 +1,20 @@
 # Two-channel split screen
 
-Offline candidate: `0.11.7-commercial-break.30-split-hardened`, versionCode 49.
-Development branch: `codex/two-channel-split-screen`. This candidate has not been
-installed or tested on the Shield. The September 27 `.28` provider-guide changes
-are retained in its source; FOX East's on-device guide verification remains pending.
+Installed test candidate: `0.11.7-commercial-break.30-split-hardened`, versionCode 49.
+Development branch: `codex/two-channel-split-screen`. Installed in place on the
+Shield on October 3 with app data preserved. The September 27 `.28` provider-guide
+changes are retained. Narrow live results are below; this is not a completed
+production-regression sign-off.
+
+Offline follow-up candidate: `.31-split-controls-guide`, versionCode 50. This adds
+the user-requested focus, screen-area, expansion, and picker-guide fixes described
+below. It is not installed yet; the user is in control of the Shield.
+The final offline tests/lint/R8/resource-shrinking/release package passed, with 252
+debug/release unit-test executions and zero failures/errors. Saved APK:
+`downloads/OpenTV/opentv-v0.11.7-commercial-break.31-split-controls-guide.apk`
+(relative to the parent Shield workspace), SHA-256
+`042DD06BB113AA8FEC75E6B4169C35199EBC699FB20FA60EF072FA0257580A38`.
+Its signing certificate matches the installed custom builds.
 
 ## Controls
 
@@ -33,6 +44,27 @@ are retained in its source; FOX East's on-device guide verification remains pend
 9. Each picture's **Try again** resolves its provider link again, including a fresh
    temporary Stalker link, rather than just reusing an expired address. Lookup failures
    also have Retry. Changing channel or leaving the screen cancels an in-flight lookup.
+10. In `.31`, the toolbar is an overlay, never a reserved strip below the videos.
+    After a second channel is chosen, controls/labels/borders hide after five idle seconds.
+    Select or a direction wakes them; that complete first press (including repeats and
+    release) is consumed so it cannot also expand a picture. Down wakes directly onto
+    the first enabled action. Up from the toolbar returns to the selected picture;
+    Left/Right between pictures changes selection, not sound.
+11. Only a focused action has bright fill and a thick white outline. The audible action
+    has a separate check mark. The picture with remote focus has a white outline;
+    the selected picture remains labelled Selected and outlined blue while the toolbar
+    owns focus. These decorations disappear with the idle controls.
+12. Each picture uses the full height of its half-screen. Fit preserves the full frame
+    and can leave black bars. **Fill pictures (crop edges)** fills those tall halves
+    by cropping; **Fit pictures (show whole picture)** undoes it. This choice is local
+    to the split session. An expanded picture always uses the entire screen, fits its
+    original aspect ratio, and immediately hides controls. Back restores both pictures.
+13. The second-channel picker shows the current programme and local start/end times
+    under each channel name, including the existing compact college-football matchup
+    formatter. It reads the enabled-feed cache, uses populated override/provider/matched
+    IDs and sibling quality-variant fallback, and refreshes its notion of Now every minute.
+    The current-programme index is shared across rows and built off the UI thread;
+    catalogue updates are observed. No feed refresh, schema change, or disk cache is added.
 
 ## Playback and resources
 
@@ -90,6 +122,9 @@ and adaptive-HLS tests remain part of the build.
 It also checks the fail-closed recording guard, filtered focus restoration, the terminal
 audio-router shutdown, and multiview learning isolation. `SplitLoadControlTest` checks
 the actual Media3 load-control policy before/after promotion.
+`.31` adds regressions for the controls wake press/release tail, whole-frame expansion
+even in Fill mode, programme-boundary rollover, empty-ID and sibling-variant fallback,
+hidden-channel exclusion, and provider-isolated logical guide keys.
 
 If OneDrive makes generated files unreadable to Gradle, keep the source in place and
 redirect only disposable build outputs to a fresh local temporary directory:
@@ -103,7 +138,41 @@ New-Item -ItemType Directory -Path $env:OPENTV_OFFLINE_BUILD_DIR
 These checks validate code and packaging. They cannot establish actual two-decoder
 performance, provider connection allowance, or physical remote focus on this Shield.
 
-## Live testing when the user is ready
+## October 3 live results (partial)
+
+- Installed with the same signer and app UID, retaining the provider and guide.
+  Pre-install `/data` available space was 1,157,192 KiB. No data or cache was cleared.
+- Remote-equivalent ADB D-pad/Select inputs opened split screen and its local picker.
+  Fox Business Network and ABC EAST both displayed live video.
+- AudioFlinger showed the original audio session 713 at 0 dB and secondary session
+  721 at negative infinity with Left audio selected. Right audio reversed those
+  gains. Moving focus to the other picture did not change the audible session.
+- Expanding either picture and collapsing with Back preserved both audio session
+  identities. Expansion selected that picture's audio and muted the other.
+- Exit split screen removed the secondary audio track and retained the original
+  session 713 at 0 dB. No new primary tune was logged during expansion/collapse/exit.
+- App PSS during dual playback was about 193 MiB. The primary feed had repeated
+  rebuffer events in this run, including before the second stream started; this
+  test does not establish sustained smoothness or the cause of those stalls.
+- An unexpected outer-rail focus / Leave dialog was observed during the subsequent
+  guide navigation. It needs an isolated physical-remote reproduction before a
+  cause is assigned. The user took over testing, and automated input stopped.
+- Keep-right promotion, repeated entry/exit, scheduled recording, PiP/Home/Plex,
+  codec stress, and physical-remote ergonomics remain unverified in this live run.
+  An audible listening confirmation was requested; audio telemetry is not a claim
+  that the tester could hear the TV directly.
+
+Screenshots and a credential-free report are saved in the workspace under
+`test-results/split-screen-live-2026-10-03/`. The test paused with the user in control;
+do not send remote inputs while the user is testing or watching unless requested.
+
+## Remaining live checklist
+
+For `.31`, additionally confirm bright action focus and selected-picture decoration,
+idle auto-hide/reveal with no accidental expansion on release, no bottom strip in
+either layout, both expanded pictures filling the screen, Fill/Fit cropping behavior,
+and current programmes in All/Favourites/other categories. Offline checks cannot
+confirm the actual Shield SurfaceView geometry or physical focus ergonomics.
 
 1. Install in place with app data preserved; confirm adequate free storage first.
 2. Start a channel, open split screen, choose a second from another category (for
