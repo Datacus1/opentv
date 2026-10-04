@@ -549,9 +549,14 @@ private fun VideoPane(
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { context ->
-                PlayerView(context).apply {
+                // SurfaceView can draw its zoomed surface outside Compose's half-screen clip
+                // on this Shield. TextureView and native parent clipping contain BOTH pictures.
+                (android.view.LayoutInflater.from(context)
+                    .inflate(R.layout.split_player_view, null, false) as PlayerView).apply {
                     player = controller.player
                     useController = false
+                    clipChildren = true
+                    clipToPadding = true
                     this.resizeMode = resizeMode
                     isFocusable = false
                     isFocusableInTouchMode = false

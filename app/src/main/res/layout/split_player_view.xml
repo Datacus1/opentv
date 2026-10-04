@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Split pictures must crop inside their own view, not punch a SurfaceView hole
+     outside Compose's pane. TextureView participates in normal parent clipping. -->
+<androidx.media3.ui.PlayerView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:clipChildren="true"
+    android:clipToPadding="true"
+    app:surface_type="texture_view"
+    app:resize_mode="fit"
+    app:use_controller="false" />

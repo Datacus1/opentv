@@ -1,20 +1,29 @@
 # Two-channel split screen
 
-Installed test candidate: `0.11.7-commercial-break.30-split-hardened`, versionCode 49.
+Installed test candidate: `0.11.7-commercial-break.32-split-surface-clip`, versionCode 51.
 Development branch: `codex/two-channel-split-screen`. Installed in place on the
-Shield on October 3 with app data preserved. The September 27 `.28` provider-guide
-changes are retained. Narrow live results are below; this is not a completed
-production-regression sign-off.
+Shield on October 4 with the existing signer, app UID, and app data preserved.
+The September 27 `.28` provider-guide changes are retained. Narrow live results
+are below; this is not a completed production-regression sign-off.
 
-Offline follow-up candidate: `.31-split-controls-guide`, versionCode 50. This adds
-the user-requested focus, screen-area, expansion, and picker-guide fixes described
-below. It is not installed yet; the user is in control of the Shield.
-The final offline tests/lint/R8/resource-shrinking/release package passed, with 252
-debug/release unit-test executions and zero failures/errors. Saved APK:
-`downloads/OpenTV/opentv-v0.11.7-commercial-break.31-split-controls-guide.apk`
+The `.31` focus, screen-area, expansion, and picker-guide changes are included.
+Final offline tests passed with 256 debug/release unit-test executions and zero
+failures/errors; release-critical lint, R8, resource shrinking, and packaging passed.
+Saved APK:
+`downloads/OpenTV/opentv-v0.11.7-commercial-break.32-split-surface-clip.apk`
 (relative to the parent Shield workspace), SHA-256
-`042DD06BB113AA8FEC75E6B4169C35199EBC699FB20FA60EF072FA0257580A38`.
+`D70A17E2FF36141EC4FA56E703C97221660A4BEDEAB9015CE3C02C93B6DDB351`.
 Its signing certificate matches the installed custom builds.
+
+October 4 live testing installed `.31` and verified the picker programme rows, bright
+action focus/selected-picture decoration, idle toolbar hide, and wake-release guard.
+It also exposed zoomed SurfaceView overflow: the native video could extend outside a
+Compose half-screen clip, making one picture appear larger or draw over the other.
+`.32-split-surface-clip` (versionCode 51) changes only split-screen output views to
+TextureView with native parent clipping through `res/layout/split_player_view.xml`.
+Ordinary guide/full-screen/PiP output views, decoders, buffering, and audio routing are
+unchanged. Both pictures now occupy equal halves in Fill mode, without overlap.
+Both expanded pictures visually fill the screen; Back restores the dual layout.
 
 ## Controls
 
@@ -125,6 +134,9 @@ the actual Media3 load-control policy before/after promotion.
 `.31` adds regressions for the controls wake press/release tail, whole-frame expansion
 even in Fill mode, programme-boundary rollover, empty-ID and sibling-variant fallback,
 hidden-channel exclusion, and provider-isolated logical guide keys.
+`.32` adds `SplitPlayerViewTest`, checking the actual inflated TextureView, native
+clipping, disabled native controls, exact half-screen viewport in Zoom, and
+whole-screen viewport in Fit.
 
 If OneDrive makes generated files unreadable to Gradle, keep the source in place and
 redirect only disposable build outputs to a fresh local temporary directory:
@@ -166,13 +178,39 @@ Screenshots and a credential-free report are saved in the workspace under
 `test-results/split-screen-live-2026-10-03/`. The test paused with the user in control;
 do not send remote inputs while the user is testing or watching unless requested.
 
+## October 4 live results (partial)
+
+- CBS EAST and ABC EAST both advanced in dual playback. In Fill mode the corrected
+  `.32` screenshot shows the division at x=960 on a 1920x1080 screen, with each
+  picture occupying its half and no reserved bottom strip or video overflow.
+- Both left and right expansion displayed a whole-screen picture with decorations
+  hidden. Back collapsed without replacing either audio session. The right pane's
+  accessibility focus bounds were exactly 1920x1080; the left pane's semantics
+  reported width 1872 despite visually filling the screen. That semantics discrepancy
+  is not evidence of unequal video geometry, but remains worth checking with the remote.
+- Idle controls hid after five seconds. A wake Select did not expand the picture;
+  a subsequent deliberate Select did. Bright action focus and a separate selected
+  picture outline were visible. All-channel picker rows showed cached programmes
+  and local times. Initial blank CBS guide data populated after cold-cache loading.
+- Primary session 1009 and secondary session 1017 persisted during expansion/collapse.
+  AudioFlinger gains were 0 dB for the expanded pane and negative infinity for the
+  other. Exit removed the secondary track and retained original session 1009 at
+  0 dB with no new primary tune. These are telemetry checks, not direct listening.
+- CBS EAST was restored to ordinary full-screen playback and automated inputs stopped.
+  Only the two disposable UI-dump/screenshot files created on the Shield were removed.
+- Final measured free space was 1,069,824 KiB. Existing credential-safe repository
+  telemetry reported 247,736 cached programmes, above the documented 200,000 total
+  cap. This is a separate follow-up concern; no guide refresh, deletion, storage-policy
+  change, or data clear was forced during playback.
+
+Evidence: parent workspace `test-results/split-screen-live-2026-10-04/RESULTS.md`.
+
 ## Remaining live checklist
 
-For `.31`, additionally confirm bright action focus and selected-picture decoration,
-idle auto-hide/reveal with no accidental expansion on release, no bottom strip in
-either layout, both expanded pictures filling the screen, Fill/Fit cropping behavior,
-and current programmes in All/Favourites/other categories. Offline checks cannot
-confirm the actual Shield SurfaceView geometry or physical focus ergonomics.
+The October 4 remote-equivalent checks cover the reported layout bug, both expansions,
+action/picture decoration, idle hide/wake, and All-channel programme rows. Physical
+remote ergonomics and programme rows in Favourites/other categories still need testing.
+The broader checks below remain pending unless explicitly covered above.
 
 1. Install in place with app data preserved; confirm adequate free storage first.
 2. Start a channel, open split screen, choose a second from another category (for
