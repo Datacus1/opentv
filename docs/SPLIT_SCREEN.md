@@ -1,18 +1,18 @@
 # Two-channel split screen
 
-Installed test candidate: `0.11.7-commercial-break.33-menu-directions`, versionCode 52.
+Installed test candidate: `0.11.7-commercial-break.35-live-seek-picture-menu`, versionCode 54.
 Development branch: `codex/two-channel-split-screen`. Installed in place on the
 Shield on October 4 with the existing signer, app UID, and app data preserved.
 The September 27 `.28` provider-guide changes are retained. Narrow live results
 are below; this is not a completed production-regression sign-off.
 
 The `.31` focus, screen-area, expansion, and picker-guide changes are included.
-Final offline tests passed with 264 debug/release unit-test executions and zero
+Final offline tests passed with 284 debug/release unit-test executions and zero
 failures/errors; release-critical lint, R8, resource shrinking, and packaging passed.
 Saved APK:
-`downloads/OpenTV/opentv-v0.11.7-commercial-break.33-menu-directions.apk`
+`downloads/OpenTV/opentv-v0.11.7-commercial-break.35-live-seek-picture-menu.apk`
 (relative to the parent Shield workspace), SHA-256
-`9202BD7742F6EC39E2F00AD60C4E1B187204DB240E6ACD139C0321C259B890BA`.
+`C6EB095E8250F9A2C526F3857E610BC82369910864ABD166246CC72AF49CDBD1`.
 Its signing certificate matches the installed custom builds.
 
 October 4 live testing installed `.31` and verified the picker programme rows, bright
@@ -29,38 +29,46 @@ Both expanded pictures visually fill the screen; Back restores the dual layout.
 
 1. Watch a channel normally, reveal the player controls, and choose **Split screen**.
    Entering split screen resumes the original channel if it was paused.
-2. Choose **Choose second channel**. Browse All channels, Favourites, or a category,
-   or search the saved channel catalogue. This can select a channel from another guide tab.
-3. Use **Left audio** / **Right audio** to switch sound. Merely focusing a picture
-   does not change sound. An **Audio** label identifies the audible pane.
-4. Select a picture or choose **Expand picture** to expand it; **Two pictures** or
-   Back restores the two panes. Expansion keeps both players and their buffers alive.
-5. **Change second channel** retunes only the second player.
+2. Move Left/Right to select a picture, including the initially empty right picture.
+   Select opens a small menu with **Change channel**, **Audio select**, and
+   **Expand picture**. The opening press/release cannot activate a menu item.
+   Expand is disabled for an empty picture. There is no separate second-channel button.
+3. Sound follows a change in selected picture. **Audio select** lets you explicitly
+   choose Left picture or Right picture for sound without changing the selected picture.
+   That override survives closing the menu; changing picture selection resumes follow-selection.
+   The **Audio** label identifies the audible pane. An empty right picture falls back to left audio.
+4. **Expand picture** uses the selected picture; **Two pictures** or Back restores
+   both panes. Expansion keeps both players/buffers alive and selects that picture's audio.
+5. **Change channel** retunes only the selected picture, including the left picture.
+   Browse All channels, Favourites, categories, or search the saved catalogue. The
+   other picture's logical channel and its quality variants are excluded.
 6. Focus either picture, then choose **Keep left/right channel full-screen** to retain
    that picture and close the other stream. The already-prepared second player can
    become the shared live session without resolving its URL or preparing it again.
    The action stays disabled until the selected second channel is ready.
    Channel-up/down then uses the second channel's picker list rather than the old
    picture's guide tab. Back restores the kept channel's guide selection.
-7. **Exit split screen** releases the second player and returns to the original channel.
-   Back from the two-picture view returns to the guide with that original channel
+7. **Exit split screen** releases the second player and returns to the current left channel.
+   Back from the two-picture view returns to the guide with that current left channel
    selected and playing in the existing guide preview. Back from an expanded picture
    first restores the two-picture view. Back in the picker dismisses only the picker.
-8. The picker retains category, search, favourites mode, scroll positions, and last
-   focused channel for this split-screen session. All/Favourites stay visible outside
+8. Each picture's picker independently retains category, search, favourites mode,
+   scroll positions, and last focused channel for this split-screen session. All/Favourites stay visible outside
    the scrolling category list. Focus is requested only after placement, and a removed
-   channel falls back safely. Dismissing the picker focuses the harmless Exit control.
+   channel falls back safely. Dismissing the picker restores the selected picture;
+   temporary restoration to an old focus owner cannot steal selection/audio.
 9. Each picture's **Try again** resolves its provider link again, including a fresh
    temporary Stalker link, rather than just reusing an expired address. Lookup failures
    also have Retry. Changing channel or leaving the screen cancels an in-flight lookup.
 10. In `.31`, the toolbar is an overlay, never a reserved strip below the videos.
     After a second channel is chosen, controls/labels/borders hide after five idle seconds.
-    Select or a direction wakes them; that complete first press (including repeats and
-    release) is consumed so it cannot also expand a picture. Down wakes directly onto
+    Select wakes directly into the picture menu; directions wake the overlay. The
+    complete opening press (including repeats/release) is consumed so it cannot choose
+    a menu item. Down wakes directly onto
     the first enabled action. Up from the toolbar returns to the selected picture;
-    Left/Right between pictures changes selection, not sound.
-11. Only a focused action has bright fill and a thick white outline. The audible action
-    has a separate check mark. The picture with remote focus has a white outline;
+    Left/Right between pictures changes selection and sound.
+11. Only a focused action has bright fill and a thick white outline. The picture
+    supplying sound has an Audio label. The picture with remote focus has a white outline;
     the selected picture remains labelled Selected and outlined blue while the toolbar
     owns focus. These decorations disappear with the idle controls.
 12. Each picture uses the full height of its half-screen. Fit preserves the full frame
@@ -80,6 +88,27 @@ Both expanded pictures visually fill the screen; Back restores the dual layout.
     Open lists and track/quality/aspect panels retain normal Up/Down navigation;
     guide browsing and split-picture navigation are unchanged. Dedicated CH+/CH-
     keys, if another remote has them, keep their separate channel shortcuts.
+15. Both ordinary and split toolbars fit their actions in one equal-width row without
+    horizontal scrolling. The split toolbar has only Expand/Two pictures, Fill/Fit,
+    Keep full-screen, and Exit. Channel/audio actions belong to the picture menu.
+
+## Live rewind and forward
+
+The ordinary live controls show a read-only replay progress bar, time behind live,
+and the available safe replay range. A leading `~` means the feed lacks programme
+timestamps: the delay is estimated from its rolling playlist window, not wall-clock time.
+**Go live** returns to the safe live position and resumes paused playback.
+
+Live seeks are clamped inside the current seekable window and retain the existing
+adaptive-HLS safety offset. Unknown or too-short windows hide rewind/forward rather
+than promise unavailable replay. This is not a saved-recording timeline and does not
+add a disk DVR/cache or extend provider history. Saved-recording/VOD seeking is unchanged.
+
+An expired live window recovers with `seekToDefaultPosition()` then `prepare()`, as
+documented by [Media3 live streaming](https://developer.android.com/media/media3/exoplayer/live-streaming).
+Recovery is limited to two attempts per 30 seconds per tune; repeated invalid feeds
+fall back to an explicit error/retry instead of looping endlessly. Manual seek buffering
+has a five-second grace period before adaptive rebuffer learning can resume.
 
 ## Playback and resources
 
@@ -90,7 +119,7 @@ Both expanded pictures visually fill the screen; Back restores the dual layout.
 - The second controller is released when the app loses resumed foreground state,
   enters PiP, exits split screen, or leaves the player route. Returning from an ordinary
   background pause can recreate the selected second stream.
-- Entering Android PiP ends split-screen mode and retains only the original channel,
+- Entering Android PiP ends split-screen mode and retains only the current left channel,
   muted according to the established SmartTube commercial-break behavior. Expanding
   PiP returns to ordinary single-channel playback.
 - Expanding a split picture keeps the other channel streaming, so it still uses two
@@ -116,7 +145,7 @@ Both expanded pictures visually fill the screen; Back restores the dual layout.
   pre-promotion history cannot be reconstructed. The selected fixed channel variant
   remains unchanged unless the user chooses another variant through normal controls.
 - The picker reads local data only. Hidden channels, disabled sources, and locked hidden
-  categories are excluded. Quality variants of the original channel are excluded to
+  categories are excluded. Quality variants of the other picture's channel are excluded to
   prevent opening the same logical channel twice on one source.
 
 ## Offline validation
@@ -145,6 +174,33 @@ clipping, disabled native controls, exact half-screen viewport in Zoom, and
 whole-screen viewport in Fit.
 `.33` adds `PlayerRemotePolicyTest`, covering repeated directional menu requests,
 delegation to open pickers, dedicated channel keys, and untouched nonvertical controls.
+`.35` adds `LiveSeekPolicyTest` for moving-window bounds, safety offsets, unavailable
+replay, progress/time formatting, timestamp fallback, and bounded recovery;
+`PictureMenuPolicyTest` covers opening-release/repeat protection, focus restoration,
+sound-follow-selection, and explicit audio overrides.
+
+## October 4 `.35` live results (partial)
+
+- In-place installation retained signer, app UID 10105, provider and app data.
+- All ten CBS EAST controls fit on screen; rewind displayed approximately one minute
+  behind live with only about 7–10 seconds of safe additional replay on that feed.
+  One expired-window error during the rewind test recovered automatically. Four
+  forward presses clamped to the safe end, with no subsequent error in that sample.
+  A later Go live expired-window error also recovered automatically.
+  This does not establish unlimited replay or eliminate upstream publication failures.
+- CBS EAST plus ABC EAST played in two equal halves. Opening Select left the menu
+  open after release. Expanding right filled the screen; Back restored both pictures.
+- AudioFlinger confirmed only one pane at 0 dB, the other at negative infinity.
+  Moving between pictures switched sound; explicit left audio remained while right
+  stayed selected, until picture selection changed again.
+- Changing left to ABC NEWS kept right ABC EAST's audio session/track unchanged.
+  Right-picker completion restored right selection/audio. CBS EAST was restored left.
+- Search filtering worked, but remote departure from the focused search text field
+  after keyboard input was not established; final CBS restoration used the verified
+  row's touch target. Do not claim a complete physical-remote search regression pass.
+- Full tests/lint/release packaging passed. Keep-secondary promotion, scheduled
+  recordings, long stress, and Netflix/PiP/Home/Plex regressions were not repeated.
+  Evidence: parent workspace `test-results/live-seek-picture-menu-2026-10-04/`.
 
 If OneDrive makes generated files unreadable to Gradle, keep the source in place and
 redirect only disposable build outputs to a fresh local temporary directory:

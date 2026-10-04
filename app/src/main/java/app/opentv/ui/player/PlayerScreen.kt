@@ -15,12 +15,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -50,10 +50,12 @@ import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.ViewWeek
+import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -101,6 +103,8 @@ import app.opentv.data.model.shownName
 import app.opentv.player.PlaybackQueue
 import app.opentv.player.PlayerController
 import app.opentv.player.LivePlaybackSession
+import app.opentv.player.LiveSeekPosition
+import app.opentv.player.LiveSeekPolicy
 import app.opentv.ui.RecordingBackgroundDialog
 import app.opentv.ui.RecordingBackgroundPrompt
 import coil.compose.AsyncImage
@@ -173,6 +177,7 @@ fun PlayerScreen(
     var panel by remember { mutableStateOf(Panel.NONE) }
     var channelListVisible by remember { mutableStateOf(false) }
     var interaction by remember { mutableIntStateOf(0) }
+    var livePosition by remember(controller) { mutableStateOf<LiveSeekPosition?>(null) }
     // Offered once per session the first time the user records here while OpenTV isn't exempt from
     // battery optimisation, so the capture survives the screen sleeping. Never blocks recording.
     var showBackgroundPrompt by remember { mutableStateOf(false) }
@@ -181,6 +186,13 @@ fun PlayerScreen(
     // Picture-in-picture. While the player is on it is "eligible" to shrink to a floating window
     // (pressing Home does it, handled in MainActivity); [inPip] drives hiding all the chrome.
     val inPip by app.opentv.core.PipState.inPip.collectAsState()
+    LaunchedEffect(controller, controlsVisible, inPip) {
+        if (!controlsVisible || inPip) return@LaunchedEffect
+        while (true) {
+            livePosition = controller.liveSeekPosition()
+            delay(500)
+        }
+    }
     val pipSupported = remember {
         android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O &&
             context.packageManager.hasSystemFeature(
@@ -369,6 +381,11 @@ fun PlayerScreen(
                     val updated = graph.catalogRepository.variants(channel)
                     if (currentId == channel.id) variants = updated
                 }
+            },
+            onChangePrimary = { channel, contextChannels ->
+                queue = contextChannels.map { PlaybackQueue.Item(it.id, it.shownName, it.logoUrl, it.number) }
+                PlaybackQueue.items = queue
+                if (channel.id != currentId) playChannelId(channel.id)
             },
             onGuide = {
                 liveSession.prepareHandoff(LivePlaybackSession.Surface.GUIDE)
@@ -560,11 +577,27 @@ fun PlayerScreen(
                     Spacer(Modifier.height(12.dp))
                 }
 
+                livePosition?.let { position ->
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(position.liveOffsetMillis?.let {
+                            stringResource(if (position.estimatedOffset) R.string.player_behind_live_estimated
+                                else R.string.player_behind_live, LiveSeekPolicy.clock(it))
+                        } ?: LiveSeekPolicy.clock(position.positionMillis),
+                            color = Color.White, style = MaterialTheme.typography.bodySmall)
+                        Text(if (position.availableMillis > 0) stringResource(R.string.player_available_replay, LiveSeekPolicy.clock(position.availableMillis))
+                            else stringResource(R.string.player_replay_unavailable),
+                            color = Color.LightGray, style = MaterialTheme.typography.bodySmall)
+                    }
+                    LinearProgressIndicator(progress = { position.progress },
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp))
+                    if (position.recovered) Text(stringResource(R.string.player_live_recovered),
+                        color = Color.LightGray, style = MaterialTheme.typography.bodySmall)
+                }
                 Row(
-                    Modifier.horizontalScroll(rememberScrollState()),
+                    Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    if (controller.isSeekable) {
+                    if (controller.canSeekLive) {
                         BarChip(Icons.Filled.FastRewind, stringResource(R.string.player_rewind), false) {
                             controller.seekBackward(); interaction++
                         }
@@ -580,7 +613,7 @@ fun PlayerScreen(
                         controller.player.playWhenReady = !paused
                         interaction++
                     }
-                    if (controller.isSeekable) {
+                    if (controller.canSeekLive) {
                         Spacer(Modifier.width(10.dp))
                         BarChip(Icons.Filled.FastForward, stringResource(R.string.player_forward), false) {
                             controller.seekForward(); interaction++
@@ -621,6 +654,16 @@ fun PlayerScreen(
                             paused = false
                             controller.player.playWhenReady = true
                             splitScreen = true
+                        }
+                    }
+
+                    if (livePosition != null) {
+                        Spacer(Modifier.width(4.dp))
+                        BarChip(Icons.Filled.LiveTv, stringResource(R.string.player_go_live), false) {
+                            controller.returnToLive()
+                            paused = false
+                            controller.player.playWhenReady = true
+                            interaction++
                         }
                     }
                     if (pipSupported) {
@@ -913,7 +956,7 @@ private fun OptionRow(
 }
 
 @Composable
-private fun BarChip(
+private fun RowScope.BarChip(
     icon: ImageVector,
     label: String,
     selected: Boolean,
@@ -929,8 +972,8 @@ private fun BarChip(
     }
     val content = if (focused) MaterialTheme.colorScheme.onPrimary else Color.White
 
-    Row(
-        modifier = Modifier
+    Column(
+        modifier = Modifier.weight(1f).heightIn(min = 52.dp)
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .onFocusChanged { focused = it.isFocused }
             .clip(RoundedCornerShape(12.dp))
@@ -940,12 +983,13 @@ private fun BarChip(
                 else Modifier,
             )
             .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .padding(horizontal = 3.dp, vertical = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
     ) {
-        Icon(icon, contentDescription = label, tint = if (focused) content else (iconTint ?: content))
-        Spacer(Modifier.width(6.dp))
-        Text(label, style = MaterialTheme.typography.labelLarge, color = content)
+        Icon(icon, contentDescription = null, modifier = Modifier.size(20.dp), tint = if (focused) content else (iconTint ?: content))
+        Text(label, style = MaterialTheme.typography.labelSmall, color = content,
+            maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
     }
 }
 

@@ -7,6 +7,7 @@ package app.opentv.player
 
 import android.content.Context
 import android.util.Log
+import android.os.SystemClock
 import androidx.annotation.OptIn
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -15,6 +16,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
+import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
@@ -136,6 +138,9 @@ class PlayerController(
     private var currentLiveTargetMillis = AdaptiveLivePolicy.DEFAULT_TARGET_MILLIS
     private var currentReachedReady = false
     private val liveLearning = LiveOffsetLearningPolicy(multiview)
+    private var manualSeekUntil = 0L
+    private var recoveryNoticeUntil = 0L
+    private val liveRecoveryGate = LiveWindowRecoveryGate()
 
     /** Split-screen congestion must not teach a permanent single-channel live offset. */
     fun setMultiviewActive(active: Boolean) {
@@ -335,6 +340,7 @@ class PlayerController(
                     if (
                         playbackState == Player.STATE_BUFFERING &&
                         currentReachedReady &&
+                        SystemClock.elapsedRealtime() >= manualSeekUntil &&
                         !preview &&
                         current?.let(::usesAdaptiveHlsPolicy) == true
                     ) {
@@ -363,6 +369,18 @@ class PlayerController(
                 }
 
                 override fun onPlayerError(error: PlaybackException) {
+                    val expiredLiveWindow = current?.isLive == true &&
+                        error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW
+                    if (expiredLiveWindow && liveRecoveryGate.allow(SystemClock.elapsedRealtime())) {
+                        manualSeekUntil = SystemClock.elapsedRealtime() + LiveSeekPolicy.MANUAL_SEEK_GRACE_MS
+                        recoveryNoticeUntil = SystemClock.elapsedRealtime() + 10_000L
+                        _state.value = State.Buffering(current?.title.orEmpty())
+                        // Media3's documented live-window recovery; retain the prepared media item.
+                        player.seekToDefaultPosition()
+                        player.prepare()
+                        Log.i(LIVE_POLICY_TAG, "event=live_window_recovered")
+                        return
+                    }
                     consecutiveFailures++
                     val request = current
                     _state.value = State.Error(
@@ -372,7 +390,7 @@ class PlayerController(
                     )
                     // One silent restart covers the common case of a provider dropping the
                     // connection when another device on the account starts streaming.
-                    if (consecutiveFailures < MAX_AUTO_RESTARTS && request != null) {
+                    if (!expiredLiveWindow && consecutiveFailures < MAX_AUTO_RESTARTS && request != null) {
                         scope.launch {
                             delay(AUTO_RESTART_DELAY_MILLIS)
                             if (current == request) play(request, debounce = false)
@@ -403,6 +421,9 @@ class PlayerController(
 
             consecutiveFailures = 0
             currentReachedReady = false
+            manualSeekUntil = 0L
+            recoveryNoticeUntil = 0L
+            liveRecoveryGate.reset()
             liveLearning.beginTune()
             httpFactory.setDefaultRequestProperties(mapOf("User-Agent" to request.userAgent))
             _state.value = State.Buffering(request.title)
@@ -503,14 +524,51 @@ class PlayerController(
     }
 
     fun seekBackward() {
-        if (player.isCurrentMediaItemSeekable) player.seekBack()
+        seekRelative(-SEEK_INCREMENT_MILLIS)
     }
 
     fun seekForward() {
-        if (player.isCurrentMediaItemSeekable) player.seekForward()
+        seekRelative(SEEK_INCREMENT_MILLIS)
+    }
+
+    private fun liveSeekBounds(): LongRange? {
+        if (current?.isLive != true || !player.isCurrentMediaItemLive || !player.isCurrentMediaItemSeekable) return null
+        val timeline = player.currentTimeline
+        if (timeline.isEmpty) return null
+        val window = timeline.getWindow(player.currentMediaItemIndex, Timeline.Window())
+        val safety = if (current?.let(::usesAdaptiveHlsPolicy) == true) currentLiveTargetMillis else 2_000L
+        return LiveSeekPolicy.bounds(window.durationMs, window.defaultPositionMs, safety)
+    }
+
+    private fun seekRelative(delta: Long) {
+        if (!player.isCurrentMediaItemSeekable) return
+        if (current?.isLive == true) {
+            val bounds = liveSeekBounds() ?: return
+            manualSeekUntil = SystemClock.elapsedRealtime() + LiveSeekPolicy.MANUAL_SEEK_GRACE_MS
+            val target = LiveSeekPolicy.target(player.currentPosition, delta, bounds)
+            Log.i(LIVE_POLICY_TAG, "event=manual_seek direction=${if (delta < 0) "back" else "forward"} target_ms=$target safe_end_ms=${bounds.last}")
+            player.seekTo(target)
+        } else if (delta < 0) player.seekBack() else player.seekForward()
+    }
+
+    fun returnToLive() {
+        if (current?.isLive != true || !player.isCurrentMediaItemLive) return
+        manualSeekUntil = SystemClock.elapsedRealtime() + LiveSeekPolicy.MANUAL_SEEK_GRACE_MS
+        val bounds = liveSeekBounds()
+        if (bounds != null) player.seekTo(bounds.last) else player.seekToDefaultPosition()
+    }
+
+    fun liveSeekPosition(): LiveSeekPosition? {
+        if (current?.isLive != true || !player.isCurrentMediaItemLive || player.duration <= 0) return null
+        val bounds = liveSeekBounds()
+        return LiveSeekPosition(player.currentPosition.coerceAtLeast(0), bounds?.let { it.last - it.first } ?: 0,
+            LiveSeekPolicy.liveOffset(player.currentLiveOffset, player.duration, player.currentPosition),
+            bounds?.let { LiveSeekPolicy.progress(player.currentPosition, it) } ?: 1f,
+            SystemClock.elapsedRealtime() < recoveryNoticeUntil, estimatedOffset = player.currentLiveOffset < 0)
     }
 
     val isSeekable: Boolean get() = player.isCurrentMediaItemSeekable
+    val canSeekLive: Boolean get() = liveSeekBounds() != null
 
     private fun firstSupportedIndex(group: Tracks.Group): Int {
         for (i in 0 until group.length) if (group.isTrackSupported(i)) return i

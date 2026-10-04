@@ -115,6 +115,16 @@
 
     <!-- ============================ Player controls ============================ -->
     <string name="player_rewind">Rewind</string>
+    <string name="player_behind_live">%1$s behind live</string>
+    <string name="player_behind_live_estimated">~%1$s behind live</string>
+    <string name="player_available_replay">%1$s available replay</string>
+    <string name="player_replay_unavailable">No safe replay window available</string>
+    <string name="player_live_recovered">Replay expired — returned to the safe live position</string>
+    <string name="player_go_live">Go live</string>
+    <string name="split_change_channel">Change channel</string>
+    <string name="split_audio_select">Audio select</string>
+    <string name="split_empty_picture">Select this picture to choose a channel</string>
+    <string name="split_keep_picture">Keep full-screen</string>
     <string name="player_pause">Pause</string>
     <string name="player_forward">Forward</string>
     <string name="player_subtitles">Subtitles</string>

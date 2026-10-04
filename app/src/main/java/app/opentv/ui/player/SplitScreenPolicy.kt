@@ -12,6 +12,12 @@ import app.opentv.data.parser.ChannelNameNormalizer
 internal object SplitScreenPolicy {
     const val CONTROLS_TIMEOUT_MS = 5_000L
 
+    fun audioAfterSelection(oldSelection: Int, newSelection: Int, audioPane: Int): Int =
+        if (oldSelection != newSelection) newSelection else audioPane
+
+    fun acceptPaneFocus(requestedPane: Int?, focusedPane: Int): Boolean =
+        requestedPane == null || requestedPane == focusedPane
+
     // Media3 AspectRatioFrameLayout: FIT=0, ZOOM=4. Keep this policy JVM-testable.
     fun resizeMode(fillPictures: Boolean, expanded: Boolean): Int =
         if (fillPictures && !expanded) 4 else 0
@@ -77,5 +83,16 @@ internal class SplitControlsWakeGuard {
         if (downTime != time) { downTime = null; return false }
         if (up) downTime = null
         return true
+    }
+}
+
+/** Never activate a newly opened menu from an orphan key-up or a held repeat. */
+internal class MenuSelectActivation {
+    private var downTime: Long? = null
+    fun activate(time: Long, up: Boolean, repeat: Int): Boolean {
+        if (!up) { if (repeat == 0) downTime = time; return false }
+        val paired = downTime == time
+        downTime = null
+        return paired
     }
 }

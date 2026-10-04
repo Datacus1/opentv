@@ -14,8 +14,8 @@ android {
         applicationId = "app.opentv"
         minSdk = 23
         targetSdk = 35
-        versionCode = 52
-        versionName = "0.11.7-commercial-break.33-menu-directions"
+        versionCode = 54
+        versionName = "0.11.7-commercial-break.35-live-seek-picture-menu"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
