@@ -14,8 +14,8 @@ android {
         applicationId = "app.opentv"
         minSdk = 23
         targetSdk = 35
-        versionCode = 51
-        versionName = "0.11.7-commercial-break.32-split-surface-clip"
+        versionCode = 52
+        versionName = "0.11.7-commercial-break.33-menu-directions"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

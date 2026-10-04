@@ -392,6 +392,22 @@ fun PlayerScreen(
                     }
                     return@onPreviewKeyEvent true
                 }
+                val verticalAction = PlayerRemotePolicy.verticalAction(
+                    event.nativeKeyEvent.keyCode,
+                    pickerOwnsDpad = channelListVisible || panel != Panel.NONE,
+                )
+                if (verticalAction != PlayerRemotePolicy.VerticalAction.DELEGATE) {
+                    if (event.type == KeyEventType.KeyDown) {
+                        when (verticalAction) {
+                            PlayerRemotePolicy.VerticalAction.PREVIOUS_CHANNEL -> zapBy(-1)
+                            PlayerRemotePolicy.VerticalAction.NEXT_CHANNEL -> zapBy(1)
+                            else -> Unit
+                        }
+                        reveal()
+                    }
+                    // Own repeats AND release: waking the bar must not move focus off it.
+                    return@onPreviewKeyEvent true
+                }
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 val digit = keyToDigit(event.key)
                 when {
@@ -405,11 +421,6 @@ fun PlayerScreen(
                         interaction++
                         false
                     }
-                    // Channel up/down works whether or not the bar is showing — this remote has no
-                    // CH+/CH- keys, so up/down IS the channel changer. Each zap flashes the bar as a
-                    // channel banner, then it auto-hides.
-                    event.key == Key.DirectionUp || event.key == Key.ChannelUp -> { zapBy(-1); reveal(); true }
-                    event.key == Key.DirectionDown || event.key == Key.ChannelDown -> { zapBy(1); reveal(); true }
                     // With the bar up, left/right drive its buttons; let them through.
                     controlsVisible -> {
                         interaction++

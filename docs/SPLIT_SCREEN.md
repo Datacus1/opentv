@@ -1,18 +1,18 @@
 # Two-channel split screen
 
-Installed test candidate: `0.11.7-commercial-break.32-split-surface-clip`, versionCode 51.
+Installed test candidate: `0.11.7-commercial-break.33-menu-directions`, versionCode 52.
 Development branch: `codex/two-channel-split-screen`. Installed in place on the
 Shield on October 4 with the existing signer, app UID, and app data preserved.
 The September 27 `.28` provider-guide changes are retained. Narrow live results
 are below; this is not a completed production-regression sign-off.
 
 The `.31` focus, screen-area, expansion, and picker-guide changes are included.
-Final offline tests passed with 256 debug/release unit-test executions and zero
+Final offline tests passed with 264 debug/release unit-test executions and zero
 failures/errors; release-critical lint, R8, resource shrinking, and packaging passed.
 Saved APK:
-`downloads/OpenTV/opentv-v0.11.7-commercial-break.32-split-surface-clip.apk`
+`downloads/OpenTV/opentv-v0.11.7-commercial-break.33-menu-directions.apk`
 (relative to the parent Shield workspace), SHA-256
-`D70A17E2FF36141EC4FA56E703C97221660A4BEDEAB9015CE3C02C93B6DDB351`.
+`9202BD7742F6EC39E2F00AD60C4E1B187204DB240E6ACD139C0321C259B890BA`.
 Its signing certificate matches the installed custom builds.
 
 October 4 live testing installed `.31` and verified the picker programme rows, bright
@@ -74,6 +74,12 @@ Both expanded pictures visually fill the screen; Back restores the dual layout.
     IDs and sibling quality-variant fallback, and refreshes its notion of Now every minute.
     The current-programme index is shared across rows and built off the UI thread;
     catalogue updates are observed. No feed refresh, schema change, or disk cache is added.
+14. In ordinary full-screen playback, `.33` makes D-pad Up/Down reveal or keep the
+    bottom control menu open, never change channel. Both key-event halves and repeats
+    are consumed outside open pickers. Left/Right navigates the control buttons.
+    Open lists and track/quality/aspect panels retain normal Up/Down navigation;
+    guide browsing and split-picture navigation are unchanged. Dedicated CH+/CH-
+    keys, if another remote has them, keep their separate channel shortcuts.
 
 ## Playback and resources
 
@@ -137,6 +143,8 @@ hidden-channel exclusion, and provider-isolated logical guide keys.
 `.32` adds `SplitPlayerViewTest`, checking the actual inflated TextureView, native
 clipping, disabled native controls, exact half-screen viewport in Zoom, and
 whole-screen viewport in Fit.
+`.33` adds `PlayerRemotePolicyTest`, covering repeated directional menu requests,
+delegation to open pickers, dedicated channel keys, and untouched nonvertical controls.
 
 If OneDrive makes generated files unreadable to Gradle, keep the source in place and
 redirect only disposable build outputs to a fresh local temporary directory:
