@@ -1,5 +1,19 @@
 # Media3 and OkHttp ship their own consumer rules; these cover our own reflection surface.
 
+# NewPipe's pinned JavaScript interpreter performs reflective lookup. Its extractor
+# uses Context.setInterpretedMode(true), not desktop javax.script or dynalink.
+# These optional-desktop exclusions match TeamNewPipe/NewPipe's Android rules.
+-keep class org.schabi.newpipe.extractor.timeago.patterns.** { *; }
+-keep class org.mozilla.javascript.** { *; }
+-keep class org.mozilla.classfile.ClassFileWriter
+-dontwarn org.mozilla.javascript.JavaToJSONConverters
+-dontwarn org.mozilla.javascript.tools.**
+-dontwarn javax.script.**
+-dontwarn jdk.dynalink.**
+-keepclassmembers class * extends com.google.protobuf.GeneratedMessageLite {
+    <fields>;
+}
+
 # Room entities are constructed reflectively by generated code.
 -keep class app.opentv.data.model.** { *; }
 

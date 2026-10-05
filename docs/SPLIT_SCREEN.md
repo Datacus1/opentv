@@ -1,5 +1,11 @@
 # Two-channel split screen
 
+Offline development candidate `.36-youtube-split-offline` is on
+`codex/youtube-split`; it is **not installed**. See
+[native YouTube integration](YOUTUBE_SPLIT_SCREEN.md) for design, controls,
+source/dependency pins, deployment and pending live tests. The installed state below
+remains `.35`; its Netflix mapping has not been changed for the new receiver.
+
 Installed test candidate: `0.11.7-commercial-break.35-live-seek-picture-menu`, versionCode 54.
 Development branch: `codex/two-channel-split-screen`. Installed in place on the
 Shield on October 4 with the existing signer, app UID, and app data preserved.

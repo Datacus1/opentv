@@ -94,6 +94,14 @@ class MainActivity : ComponentActivity() {
      */
     private val closeCommercialBreakPipReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == ACTION_NETFLIX_TOGGLE) {
+                if (app.opentv.core.YoutubeSplitSignals.active) app.opentv.core.YoutubeSplitSignals.restoreTv()
+                else runCatching {
+                    startActivity(Intent().setComponent(android.content.ComponentName(
+                        "app.smarttube.fdroid", "com.liskovsoft.smartyoutubetv2.tv.ui.main.SplashActivity")))
+                }
+                return
+            }
             if (intent?.action == ACTION_CLOSE_COMMERCIAL_BREAK_PIP &&
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.N &&
                 isInPictureInPictureMode
@@ -112,6 +120,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val closePipFilter = IntentFilter(ACTION_CLOSE_COMMERCIAL_BREAK_PIP)
+            .apply { addAction(ACTION_NETFLIX_TOGGLE) }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(
                 closeCommercialBreakPipReceiver,
@@ -223,6 +232,7 @@ class MainActivity : ComponentActivity() {
 
         /** ADB-shell-only request from the Shield commercial-break monitor to close a stale PiP. */
         const val ACTION_CLOSE_COMMERCIAL_BREAK_PIP = "app.opentv.action.CLOSE_COMMERCIAL_BREAK_PIP"
+        const val ACTION_NETFLIX_TOGGLE = "app.opentv.action.NETFLIX_TOGGLE"
     }
 }
 

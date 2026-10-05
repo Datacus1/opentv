@@ -77,6 +77,10 @@ import app.opentv.data.model.Programme
 import app.opentv.data.model.shownName
 import app.opentv.data.parser.ChannelNameNormalizer
 import app.opentv.player.PlayerController
+import app.opentv.youtube.YoutubeRepository
+import app.opentv.youtube.YoutubeVideo
+import app.opentv.core.YoutubeSplitSignals
+import androidx.compose.runtime.SideEffect
 import app.opentv.ui.channels.GuideDirectionRepeatGate
 import app.opentv.ui.channels.guideProgrammeLabel
 import kotlinx.coroutines.CancellationException
@@ -106,29 +110,36 @@ private class SplitPickerState {
 internal fun SplitScreenPlayer(
     primary: PlayerController,
     primaryChannelId: Long?,
+    memory: SplitScreenMemory,
+    onRestorePrimary: (Long) -> Unit,
     onExit: () -> Unit,
     onGuide: () -> Unit,
     onKeepSecondary: (Channel, PlayerController, List<Channel>) -> Unit,
-    onChangePrimary: (Channel, List<Channel>) -> Unit,
+    onChangePrimary: (Channel, List<Channel>, Boolean) -> Unit,
 ) {
     val graph = ServiceLocator.get(LocalContext.current)
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var foreground by remember { mutableStateOf(lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) }
-    var audioPane by remember { mutableIntStateOf(0) }
-    var selectedPane by remember { mutableIntStateOf(0) }
-    var pendingPaneFocus by remember { mutableStateOf<Int?>(0) }
+    var audioPane by memory::audioPane
+    var selectedPane by memory::selectedPane
+    var pendingPaneFocus by remember { mutableStateOf<Int?>(memory.expandedPane ?: memory.selectedPane) }
     var focusedPane by remember { mutableStateOf<Int?>(null) }
-    var expandedPane by remember { mutableStateOf<Int?>(null) }
-    var secondaryChannel by remember { mutableStateOf<Channel?>(null) }
+    var expandedPane by memory::expandedPane
+    var secondaryChannel by memory::secondaryChannel
     var primaryChannel by remember { mutableStateOf<Channel?>(null) }
     var picker by remember { mutableStateOf(false) }
     var pictureMenu by remember { mutableStateOf(false) }
     var audioMenu by remember { mutableStateOf(false) }
+    var youtubeSearch by remember { mutableStateOf(false) }
+    var youtubeSearchPane by remember { mutableIntStateOf(0) }
     var pickerPane by remember { mutableIntStateOf(0) }
     val initialFocus = remember { FocusRequester() }
     val expandFocus = remember { FocusRequester() }
     val paneFocus = remember { listOf(FocusRequester(), FocusRequester()) }
-    var fillPictures by remember { mutableStateOf(false) }
+    var fillPictures by memory::fillPictures
+    val leftYoutube = memory.youtubeVideo.takeIf { memory.youtubePane == 0 }
+    val rightYoutube = memory.youtubeVideo.takeIf { memory.youtubePane == 1 }
+    SideEffect { YoutubeSplitSignals.active = memory.hasYoutube }
     var controlsVisible by remember { mutableStateOf(true) }
     var interaction by remember { mutableIntStateOf(0) }
     var requestedFocus by remember { mutableStateOf("pane") }
@@ -136,13 +147,14 @@ internal fun SplitScreenPlayer(
     val pickerStates = remember { listOf(SplitPickerState(), SplitPickerState()) }
     val recordings by graph.recordingRepository.observeActive().collectAsState(initial = null)
     val mayOpenSecondary = SplitScreenPolicy.mayOpenSecondary(recordings?.size)
-    val firstControlFocus = if (selectedPane == 0 || secondaryChannel != null) expandFocus else initialFocus
+    val firstControlFocus = if (memory.hasPicture(selectedPane)) expandFocus else initialFocus
     var recordingBlocked by remember { mutableStateOf(false) }
     var secondaryController by remember { mutableStateOf<PlayerController?>(null) }
     val idleSecondary = remember { kotlinx.coroutines.flow.MutableStateFlow<PlayerController.State>(PlayerController.State.Idle) }
     val secondaryState by (secondaryController?.state ?: idleSecondary).collectAsState()
     var secondaryTransferred by remember { mutableStateOf(false) }
     var primaryRetry by remember { mutableIntStateOf(0) }
+    var appliedPrimaryRetry by remember { mutableIntStateOf(0) }
     var primaryResolveError by remember { mutableStateOf(false) }
     val primaryState by primary.state.collectAsState()
     val audioRouter = remember(primary) { SplitScreenAudioRouter { primary.player.volume = it } }
@@ -164,7 +176,7 @@ internal fun SplitScreenPlayer(
         onDispose { lifecycle.removeObserver(observer) }
     }
     val inPip by PipState.inPip.collectAsState()
-    val volumes = SplitScreenPolicy.volumes(audioPane, null, secondaryChannel != null, foreground && !inPip)
+    val volumes = SplitScreenPolicy.volumes(audioPane, null, memory.hasPicture(1), foreground && !inPip)
     LaunchedEffect(volumes) { audioRouter.route(volumes) }
     DisposableEffect(primary, lifecycle) {
         primary.setMultiviewActive(true)
@@ -179,8 +191,8 @@ internal fun SplitScreenPlayer(
         }
     }
     var placed by remember { mutableStateOf(false) }
-    LaunchedEffect(picker, pictureMenu, audioMenu, placed, controlsVisible, requestedFocus, expandedPane, selectedPane, pendingPaneFocus) {
-        if (!picker && !pictureMenu && !audioMenu) {
+    LaunchedEffect(picker, pictureMenu, audioMenu, youtubeSearch, placed, controlsVisible, requestedFocus, expandedPane, selectedPane, pendingPaneFocus) {
+        if (!picker && !pictureMenu && !audioMenu && !youtubeSearch) {
             withFrameNanos { }
             val target = if (!controlsVisible || requestedFocus == "pane") paneFocus[pendingPaneFocus ?: expandedPane ?: selectedPane]
                 else if (requestedFocus == "choose") firstControlFocus else initialFocus
@@ -191,8 +203,8 @@ internal fun SplitScreenPlayer(
             }
         }
     }
-    LaunchedEffect(controlsVisible, interaction, picker, pictureMenu, audioMenu, secondaryChannel) {
-        if (controlsVisible && !picker && !pictureMenu && !audioMenu && secondaryChannel != null) {
+    LaunchedEffect(controlsVisible, interaction, picker, pictureMenu, audioMenu, youtubeSearch, secondaryChannel, rightYoutube) {
+        if (controlsVisible && !picker && !pictureMenu && !audioMenu && !youtubeSearch && memory.hasPicture(1)) {
             delay(SplitScreenPolicy.CONTROLS_TIMEOUT_MS)
             // Move focus before removing the focused toolbar; never leave focus on a removed node.
             runCatching { paneFocus[expandedPane ?: selectedPane].requestFocus() }
@@ -201,6 +213,8 @@ internal fun SplitScreenPlayer(
     }
     LaunchedEffect(mayOpenSecondary) {
         if (recordings?.isNotEmpty() == true) {
+            memory.restoreTv(primaryChannelId)?.let(onRestorePrimary)
+            YoutubeSplitSignals.active = false
             secondaryChannel = null
             audioPane = 0
             selectedPane = 0
@@ -210,15 +224,26 @@ internal fun SplitScreenPlayer(
             picker = false
             pictureMenu = false
             audioMenu = false
+            youtubeSearch = false
             controlsVisible = true
             requestedFocus = "exit"
         }
     }
-    LaunchedEffect(primaryRetry) {
-        if (primaryRetry == 0) return@LaunchedEffect
+    LaunchedEffect(primaryRetry, leftYoutube) {
+        if (primaryRetry == appliedPrimaryRetry && leftYoutube == null) return@LaunchedEffect
+        appliedPrimaryRetry = primaryRetry
         primaryResolveError = false
         primary.stop()
         try {
+            if (leftYoutube != null) {
+                val media = YoutubeRepository.resolve(leftYoutube)
+                ensureActive()
+                if (graph.recordingRepository.observeActive().first().isNotEmpty()) return@LaunchedEffect
+                primary.play(PlayerController.Request(media.videoUrl, leftYoutube.title, "Mozilla/5.0",
+                    isLive = false, audioUrl = media.audioUrl, mimeType = media.videoMime,
+                    audioMimeType = media.audioMime), debounce = false)
+                return@LaunchedEffect
+            }
             val channel = primaryChannelId?.let { graph.catalogRepository.channel(it) }
                 ?: error("Missing channel")
             val source = graph.sourceRepository.byId(channel.sourceId) ?: error("Missing source")
@@ -230,7 +255,8 @@ internal fun SplitScreenPlayer(
     }
 
     fun back() {
-        if (pictureMenu || audioMenu) { pendingPaneFocus = selectedPane; pictureMenu = false; audioMenu = false; requestedFocus = "pane" }
+        if (youtubeSearch) { youtubeSearch = false; requestedFocus = "pane" }
+        else if (pictureMenu || audioMenu) { pendingPaneFocus = selectedPane; pictureMenu = false; audioMenu = false; requestedFocus = "pane" }
         else if (picker) { pendingPaneFocus = selectedPane; picker = false; controlsVisible = true; requestedFocus = "pane" }
         else if (expandedPane != null) { expandedPane = null; controlsVisible = false }
         else onGuide()
@@ -243,7 +269,7 @@ internal fun SplitScreenPlayer(
     fun selectPane(pane: Int) {
         // Dialog dismissal may briefly restore the OLD focus owner. Do not let it steal
         // picture selection/audio before the requested pane has accepted focus.
-        if (picker || pictureMenu || audioMenu || !SplitScreenPolicy.acceptPaneFocus(pendingPaneFocus, pane)) return
+        if (picker || pictureMenu || audioMenu || youtubeSearch || !SplitScreenPolicy.acceptPaneFocus(pendingPaneFocus, pane)) return
         pendingPaneFocus = null
         audioPane = SplitScreenPolicy.audioAfterSelection(selectedPane, pane, audioPane)
         selectedPane = pane
@@ -299,7 +325,8 @@ internal fun SplitScreenPlayer(
             ) {
                 VideoPane(
                     controller = primary,
-                    title = primaryTitle,
+                    title = leftYoutube?.title ?: primaryTitle,
+                    youtube = leftYoutube != null,
                     audible = volumes.first > 0f,
                     selected = selectedPane == 0,
                     sideLabel = stringResource(R.string.split_left_picture),
@@ -323,7 +350,7 @@ internal fun SplitScreenPlayer(
                 else Modifier.weight(1f).fillMaxHeight(),
             ) {
                 val channel = secondaryChannel
-                if (channel == null) {
+                if (channel == null && rightYoutube == null) {
                     Box(Modifier.fillMaxSize().focusRequester(paneFocus[1]).focusProperties {
                         canFocus = mayOpenSecondary && expandedPane != 0
                         left = paneFocus[0]; right = FocusRequester.Cancel; up = FocusRequester.Cancel
@@ -341,6 +368,7 @@ internal fun SplitScreenPlayer(
                 } else if (foreground && !inPip && mayOpenSecondary) {
                     SecondaryPane(
                         channel = channel,
+                        youtube = rightYoutube,
                         audioRouter = audioRouter,
                         audible = volumes.second > 0f,
                         selected = selectedPane == 1,
@@ -370,7 +398,7 @@ internal fun SplitScreenPlayer(
                 SplitAction(
                     modifier = Modifier.weight(1f).focusRequester(expandFocus),
                     label = stringResource(if (expandedPane == null) R.string.split_expand else R.string.split_two_pictures),
-                    onClick = { expand(selectedPane) }, enabled = selectedPane == 0 || secondaryChannel != null,
+                    onClick = { expand(selectedPane) }, enabled = memory.hasPicture(selectedPane),
                 )
                 SplitAction(
                     modifier = Modifier.weight(1f),
@@ -380,8 +408,8 @@ internal fun SplitScreenPlayer(
                 SplitAction(
                     modifier = Modifier.weight(1f),
                     label = stringResource(R.string.split_keep_picture),
-                    enabled = selectedPane == 0 || (secondaryState is PlayerController.State.Playing &&
-                        secondaryChannel?.let { secondaryController?.isReadyChannel(it.id) } == true),
+                    enabled = !memory.hasYoutube && (selectedPane == 0 || (secondaryState is PlayerController.State.Playing &&
+                        secondaryChannel?.let { secondaryController?.isReadyChannel(it.id) } == true)),
                     onClick = {
                         if (selectedPane == 0) onExit()
                         else {
@@ -410,15 +438,20 @@ internal fun SplitScreenPlayer(
     }
     if (picker) {
         SplitChannelPicker(
-            primaryChannel = if (pickerPane == 0) secondaryChannel else primaryChannel,
-            primaryChannelId = if (pickerPane == 0) secondaryChannel?.id else primaryChannelId,
+            primaryChannel = if (pickerPane == 0) secondaryChannel.takeIf { rightYoutube == null }
+                else primaryChannel.takeIf { leftYoutube == null },
+            primaryChannelId = if (pickerPane == 0) secondaryChannel?.id.takeIf { rightYoutube == null }
+                else primaryChannelId.takeIf { leftYoutube == null },
             saved = pickerStates[pickerPane],
             onDismiss = { pendingPaneFocus = selectedPane; picker = false; controlsVisible = true; interaction++; requestedFocus = "pane" },
             onSelect = {
                 if (pickerPane == 0) {
-                    onChangePrimary(it, pickerStates[0].selectedContext)
+                    val wasYoutube = memory.youtubePane == 0
+                    memory.clearYoutubePicture(0)
+                    onChangePrimary(it, pickerStates[0].selectedContext, wasYoutube)
                     audioPane = 0
                 } else if (mayOpenSecondary) {
+                    memory.clearYoutubePicture(1)
                     secondaryChannel = it
                     audioPane = 1
                 }
@@ -436,9 +469,12 @@ internal fun SplitScreenPlayer(
         wakeGuard = wakeGuard,
         actions = listOf(
             PictureMenuAction(stringResource(R.string.split_change_channel), selectedPane == 0 || mayOpenSecondary) { openPicker() },
+            PictureMenuAction(stringResource(R.string.youtube_voice_search), mayOpenSecondary && primaryChannelId != null) {
+                youtubeSearchPane = selectedPane; pictureMenu = false; youtubeSearch = true
+            },
             PictureMenuAction(stringResource(R.string.split_audio_select), true) { pictureMenu = false; audioMenu = true },
             PictureMenuAction(stringResource(if (expandedPane == null) R.string.split_expand else R.string.split_two_pictures),
-                selectedPane == 0 || secondaryChannel != null) { pictureMenu = false; expand(selectedPane) },
+                memory.hasPicture(selectedPane)) { pictureMenu = false; expand(selectedPane) },
         ),
         onDismiss = { pendingPaneFocus = selectedPane; pictureMenu = false; requestedFocus = "pane"; interaction++ },
     )
@@ -446,9 +482,20 @@ internal fun SplitScreenPlayer(
         title = stringResource(R.string.split_audio_select), wakeGuard = wakeGuard,
         actions = listOf(
             PictureMenuAction(stringResource(R.string.split_left_picture), true) { pendingPaneFocus = selectedPane; audioPane = 0; audioMenu = false; interaction++ },
-            PictureMenuAction(stringResource(R.string.split_right_picture), secondaryChannel != null) { pendingPaneFocus = selectedPane; audioPane = 1; audioMenu = false; interaction++ },
+            PictureMenuAction(stringResource(R.string.split_right_picture), memory.hasPicture(1)) { pendingPaneFocus = selectedPane; audioPane = 1; audioMenu = false; interaction++ },
         ),
         onDismiss = { pendingPaneFocus = selectedPane; audioMenu = false; requestedFocus = "pane"; interaction++ },
+    )
+    if (youtubeSearch) YoutubeSearchDialog(
+        onDismiss = { youtubeSearch = false; pendingPaneFocus = selectedPane; requestedFocus = "pane"; interaction++ },
+        onSelect = { video ->
+            if (mayOpenSecondary && primaryChannelId != null) {
+                memory.beginYoutube(youtubeSearchPane, video, primaryChannelId)?.let(onRestorePrimary)
+                pendingPaneFocus = youtubeSearchPane
+                YoutubeSplitSignals.active = true
+            }
+            youtubeSearch = false; requestedFocus = "pane"; controlsVisible = true; interaction++
+        },
     )
 }
 
@@ -522,7 +569,8 @@ private fun SplitAction(
 @OptIn(UnstableApi::class)
 @Composable
 private fun SecondaryPane(
-    channel: Channel,
+    channel: Channel?,
+    youtube: YoutubeVideo? = null,
     audioRouter: SplitScreenAudioRouter,
     audible: Boolean,
     selected: Boolean,
@@ -556,12 +604,22 @@ private fun SecondaryPane(
             if (!transferred()) controller.release()
         }
     }
-    LaunchedEffect(channel.id, retry) {
+    LaunchedEffect(channel?.id, youtube, retry) {
         resolveError = false
         // Stop the replaced stream before minting a Stalker URL; keep just two connections.
         controller.stop()
         try {
             if (graph.recordingRepository.observeActive().first().isNotEmpty()) return@LaunchedEffect
+            if (youtube != null) {
+                val media = YoutubeRepository.resolve(youtube)
+                ensureActive()
+                if (graph.recordingRepository.observeActive().first().isNotEmpty()) return@LaunchedEffect
+                controller.play(PlayerController.Request(media.videoUrl, youtube.title, "Mozilla/5.0",
+                    isLive = false, audioUrl = media.audioUrl, mimeType = media.videoMime,
+                    audioMimeType = media.audioMime), debounce = false)
+                return@LaunchedEffect
+            }
+            checkNotNull(channel)
             val source = graph.sourceRepository.byId(channel.sourceId) ?: error("Missing source")
             check(source.enabled)
             val url = graph.catalogRepository.resolvePlaybackUrl(channel, source)
@@ -585,7 +643,8 @@ private fun SecondaryPane(
     }
     VideoPane(
         controller = controller,
-        title = channel.shownName,
+        title = youtube?.title ?: channel?.shownName.orEmpty(),
+        youtube = youtube != null,
         audible = audible,
         selected = selected,
         sideLabel = stringResource(R.string.split_right_picture),
@@ -609,6 +668,7 @@ private fun SecondaryPane(
 private fun VideoPane(
     controller: PlayerController,
     title: String,
+    youtube: Boolean = false,
     audible: Boolean,
     selected: Boolean,
     sideLabel: String,
@@ -677,15 +737,17 @@ private fun VideoPane(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        if (state is PlayerController.State.Buffering || state == PlayerController.State.Idle && !resolveError) {
+        val ended = state == PlayerController.State.Idle && controller.player.playbackState == androidx.media3.common.Player.STATE_ENDED
+        if (state is PlayerController.State.Buffering || state == PlayerController.State.Idle && !resolveError && !ended) {
             CircularProgressIndicator(Modifier.align(Alignment.Center))
         }
-        if (state is PlayerController.State.Error || resolveError) {
+        if (state is PlayerController.State.Error || resolveError || ended) {
             Column(
                 Modifier.align(Alignment.Center).background(Color.Black.copy(alpha = 0.9f)).padding(16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text(stringResource(R.string.split_playback_error), color = Color.White)
+                Text(stringResource(if (ended) R.string.youtube_finished
+                    else if (youtube) R.string.youtube_playback_error else R.string.split_playback_error), color = Color.White)
                 SplitAction(enabled = visible, label = stringResource(R.string.common_try_again), onClick = onRetry)
             }
         }

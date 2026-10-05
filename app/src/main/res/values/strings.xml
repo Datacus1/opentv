@@ -1,5 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="youtube_voice_search">YouTube voice search</string>
+    <string name="youtube_finished">Playback finished</string>
+    <string name="youtube_playback_error">This YouTube video could not play. Try again or choose another public video.</string>
+    <string name="youtube_search_hint">Search YouTube</string>
+    <string name="youtube_search">Search</string>
+    <string name="youtube_speak">Speak again</string>
+    <string name="youtube_voice_unavailable">Voice recognition is unavailable. You can type a search instead.</string>
+    <string name="youtube_search_failed">YouTube search failed. Try again; your TV channels are unchanged.</string>
+    <string name="youtube_no_results">No video results. Try another search.</string>
+    <string name="youtube_signed_out">Public videos · Signed out · Select a result to replace this picture</string>
     <string name="app_name">OpenTV</string>
 
     <!-- ============================ Common / reused ============================ -->

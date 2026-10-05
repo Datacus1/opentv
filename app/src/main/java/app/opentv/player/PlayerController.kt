@@ -27,6 +27,7 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultLivePlaybackSpeedControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
@@ -122,6 +123,10 @@ class PlayerController(
         val isLive: Boolean = true,
         /** Stable database identity used only to remember this channel's learned live target. */
         val channelId: Long? = null,
+        /** Native YouTube adaptive formats may expose separate video and audio resources. */
+        val audioUrl: String? = null,
+        val mimeType: String? = null,
+        val audioMimeType: String? = null,
     )
 
     private val _state = MutableStateFlow<State>(State.Idle)
@@ -441,6 +446,7 @@ class PlayerController(
 
             val mediaItem = MediaItem.Builder()
                 .setUri(request.url)
+                .setMimeType(request.mimeType)
                 .apply {
                     if (adaptiveHls) {
                         setLiveConfiguration(
@@ -456,7 +462,16 @@ class PlayerController(
                 // stop() rather than release(): keeps the codec and the surface alive.
                 stop()
                 clearMediaItems()
-                setMediaItem(mediaItem)
+                val audioUrl = request.audioUrl
+                if (audioUrl == null) setMediaItem(mediaItem)
+                else {
+                    val sources = DefaultMediaSourceFactory(dataSourceFactory)
+                    setMediaSource(MergingMediaSource(
+                        sources.createMediaSource(mediaItem),
+                        sources.createMediaSource(MediaItem.Builder().setUri(audioUrl)
+                            .setMimeType(request.audioMimeType).build()),
+                    ))
+                }
                 if (!request.isLive && request.startPositionMillis > 0) {
                     seekTo(request.startPositionMillis)
                 }

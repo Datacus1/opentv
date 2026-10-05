@@ -182,6 +182,9 @@ fun PlayerScreen(
     // battery optimisation, so the capture survives the screen sleeping. Never blocks recording.
     var showBackgroundPrompt by remember { mutableStateOf(false) }
     var splitScreen by remember { mutableStateOf(false) }
+    val splitMemory = remember { SplitScreenMemory() }
+    val restoreTvRequest by app.opentv.core.YoutubeSplitSignals.restoreRequests.collectAsState()
+    DisposableEffect(Unit) { onDispose { app.opentv.core.YoutubeSplitSignals.active = false } }
 
     // Picture-in-picture. While the player is on it is "eligible" to shrink to a floating window
     // (pressing Home does it, handled in MainActivity); [inPip] drives hiding all the chrome.
@@ -213,7 +216,8 @@ fun PlayerScreen(
     LaunchedEffect(inPip, controller) { controller.player.volume = if (inPip) 0f else 1f }
     // A commercial break retains only the original live stream in Android PiP. Disposing the
     // split screen releases the extra decoder/connection before SmartTube starts playback.
-    LaunchedEffect(inPip) { if (inPip) splitScreen = false }
+    // Split choices survive PiP; only the current TV player runs there. YouTube is
+    // restored to the previous TV layout before handing playback to another app.
     val barFocus = remember { FocusRequester() }
     val panelFocus = remember { FocusRequester() }
     val rootFocus = remember { FocusRequester() }
@@ -287,6 +291,13 @@ fun PlayerScreen(
         val channel = graph.catalogRepository.channel(id) ?: return@LaunchedEffect
         variants = graph.catalogRepository.variants(channel)
         tuneTo(variants.firstOrNull { it.id == channel.id } ?: channel)
+    }
+
+    LaunchedEffect(restoreTvRequest, inPip) {
+        if (splitMemory.hasYoutube && (restoreTvRequest != 0L || inPip)) {
+            splitMemory.restoreTv(currentId)?.let { playChannelId(it) }
+            app.opentv.core.YoutubeSplitSignals.active = false
+        }
     }
 
     // The guide suppresses captions in its small preview. Re-apply the full-screen preference even
@@ -363,7 +374,13 @@ fun PlayerScreen(
         SplitScreenPlayer(
             primary = controller,
             primaryChannelId = currentId,
-            onExit = { splitScreen = false; reveal() },
+            memory = splitMemory,
+            onRestorePrimary = { playChannelId(it) },
+            onExit = {
+                splitMemory.restoreTv(currentId)?.let { playChannelId(it) }
+                app.opentv.core.YoutubeSplitSignals.active = false
+                splitScreen = false; reveal()
+            },
             onKeepSecondary = { channel, secondary, contextChannels ->
                 previousId = currentId
                 currentId = channel.id
@@ -382,12 +399,14 @@ fun PlayerScreen(
                     if (currentId == channel.id) variants = updated
                 }
             },
-            onChangePrimary = { channel, contextChannels ->
+            onChangePrimary = { channel, contextChannels, force ->
                 queue = contextChannels.map { PlaybackQueue.Item(it.id, it.shownName, it.logoUrl, it.number) }
                 PlaybackQueue.items = queue
-                if (channel.id != currentId) playChannelId(channel.id)
+                if (force || channel.id != currentId) playChannelId(channel.id)
             },
             onGuide = {
+                splitMemory.restoreTv(currentId)?.let { playChannelId(it) }
+                app.opentv.core.YoutubeSplitSignals.active = false
                 liveSession.prepareHandoff(LivePlaybackSession.Surface.GUIDE)
                 onBack()
             },

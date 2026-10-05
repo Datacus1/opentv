@@ -14,8 +14,8 @@ android {
         applicationId = "app.opentv"
         minSdk = 23
         targetSdk = 35
-        versionCode = 54
-        versionName = "0.11.7-commercial-break.35-live-seek-picture-menu"
+        versionCode = 55
+        versionName = "0.11.7-commercial-break.36-youtube-split-offline"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -101,7 +101,8 @@ ksp {
 }
 
 dependencies {
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.3")
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.3")
+    implementation("com.github.teamnewpipe:NewPipeExtractor:v0.26.5")
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
