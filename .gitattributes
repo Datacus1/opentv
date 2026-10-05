@@ -1,0 +1,2 @@
+# This candidate is copied to Android's shell; CRLF breaks its conditionals.
+scripts/shield-netflix-toggle.sh text eol=lf
