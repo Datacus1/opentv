@@ -1,5 +1,32 @@
 # Native YouTube picture — offline candidate
 
+## October 7 storage hotfix
+
+Branch `codex/storage-reserve-crash` is based on installed `.36` source `344411f`,
+not the uninstalled `.37` direct-voice changes. `.38-storage-startup-fix` (versionCode
+57) fixes startup termination from an uncaught short-EPG storage-reserve exception.
+It does not change voice, picture controls, Netflix scripts, storage thresholds,
+retention/caps, or the database schema. Device status/evidence and the signed recovery
+APK are recorded in the parent `NVIDIA-Shield-Netflix-Button-Runbook.md`.
+
+Low-space sync returns a read-only summary of existing cached guide coverage before
+feed creation, network downloads, failure metadata, cleanup or matcher writes. Force
+refresh does not bypass the 1.25 GiB starting reserve. Short-EPG requests check space
+before fetching; if space drops below the unchanged 1.10 GiB hard floor in flight,
+the refresh defers without escaping. Programmes and aliases commit atomically.
+Cancellation propagates; ordinary optional startup guide/normalizer failures are
+reported by exception class only and no longer terminate the process. No cache or
+provider data is cleared. Refresh can resume after sufficient space becomes available.
+
+`EpgStorageDeferralTest` uses real Room/repository code, simulated StatFs and intercepted
+HTTP only: both startup thresholds, forced refresh, mid-request space loss, successful
+fallback, cache preservation and cancellation. `StartupGuideWorkTest` verifies optional
+failure containment, success and cancellation propagation. These tests do not prove
+hardware voice recognition. Merge this hotfix into future feature builds before deploying
+them; the saved `.37` predates the fix and is not a safe replacement for `.38`.
+
+## Original October 4 candidate (historical)
+
 Candidate: `0.11.7-commercial-break.36-youtube-split-offline`, versionCode 55,
 branch `codex/youtube-split`, based on `.35` commit `a5db0af`.
 This candidate is **not installed**. The Shield and its existing Button 12 mapping

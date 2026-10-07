@@ -14,8 +14,8 @@ android {
         applicationId = "app.opentv"
         minSdk = 23
         targetSdk = 35
-        versionCode = 55
-        versionName = "0.11.7-commercial-break.36-youtube-split-offline"
+        versionCode = 57
+        versionName = "0.11.7-commercial-break.38-storage-startup-fix"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

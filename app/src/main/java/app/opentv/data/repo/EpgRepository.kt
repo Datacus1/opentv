@@ -8,6 +8,7 @@ package app.opentv.data.repo
 import android.content.Context
 import android.os.StatFs
 import android.util.Log
+import androidx.room.withTransaction
 import app.opentv.data.db.ChannelDao
 import app.opentv.data.db.EpgChannelAliasDao
 import app.opentv.data.db.EpgFeedDao
@@ -231,6 +232,12 @@ class EpgRepository(
     suspend fun syncAll(nowUtcMillis: Long, force: Boolean = false): SyncSummary =
         withContext(Dispatchers.IO) {
             mutationMutex.withLock {
+                // A deferral is read-only: do not grow the WAL with failure metadata, feed
+                // migrations or matching updates when storage is already below the reserve.
+                if (availableBytes() < SOFT_FREE_RESERVE_BYTES) {
+                    Log.w(TAG, "Guide refresh deferred: low free space; cached guide retained")
+                    return@withLock cachedSummary(0, feedDao.enabled().size, 0)
+                }
                 resumePendingDeletionsLocked()
                 ensureFeedsLocked()
                 maybeAutoEnableRegionalFeedLocked()
@@ -257,11 +264,7 @@ class EpgRepository(
                     }
 
                     if (availableBytes() < SOFT_FREE_RESERVE_BYTES) {
-                        val reason = "Refresh deferred to protect the Shield's storage reserve."
-                        feedDao.markFailed(feed.id, nowUtcMillis, reason)
-                        Log.w(TAG, "Feed '${feed.name}' deferred: low free space")
-                        failed++
-                        continue
+                        return@withLock cachedSummary(succeeded, failed + 1, written)
                     }
 
                     when (val result = syncFeed(feed, nowUtcMillis)) {
@@ -301,6 +304,9 @@ class EpgRepository(
                 // downloads a second regional/national guide.
                 written += syncProviderShortEpgFallbacksLocked(nowUtcMillis, force)
 
+                if (availableBytes() < SOFT_FREE_RESERVE_BYTES) {
+                    return@withLock cachedSummary(succeeded, failed, written)
+                }
                 runBoundedRetentionLocked(nowUtcMillis)
                 val (matched, total) = runMatcherLocked()
                 truncateWalWhenIdle()
@@ -309,11 +315,22 @@ class EpgRepository(
             }
         }
 
+    private suspend fun cachedSummary(succeeded: Int, failed: Int, written: Int): SyncSummary {
+        val channels = channelDao.allForMatching()
+        val populated = programmeDao.channelIdsWithProgrammesFromEnabledFeeds().toHashSet()
+        return SyncSummary(
+            succeeded, failed, written,
+            channels.count { channel -> channel.epgCandidates.any { it in populated } },
+            channels.size,
+        )
+    }
+
     private suspend fun syncProviderShortEpgFallbacksLocked(
         nowUtcMillis: Long,
         force: Boolean,
     ): Int {
         var written = 0
+        if (availableBytes() < SOFT_FREE_RESERVE_BYTES) return written
         val oldestAllowed = nowUtcMillis - RETENTION_PAST_MILLIS
         val newestAllowed = nowUtcMillis + RETENTION_FUTURE_MILLIS
 
@@ -324,6 +341,7 @@ class EpgRepository(
                 .filter { it.groupKey in PROVIDER_SHORT_EPG_GROUP_KEYS }
                 .sortedByDescending { it.qualityRank }
             for ((groupKey, variants) in candidates.groupBy { it.groupKey }) {
+                if (availableBytes() < SOFT_FREE_RESERVE_BYTES) return written
                 val syntheticId = providerShortEpgId(source.id, groupKey)
                 val cachedThrough = programmeDao.upcoming(
                     syntheticId,
@@ -335,12 +353,16 @@ class EpgRepository(
                 }
 
                 val listings = variants.firstNotNullOfOrNull { channel ->
-                    runCatching { api.shortEpg(source, channel.streamId, PROVIDER_SHORT_EPG_LIMIT) }
-                        .onFailure {
-                            Log.w(TAG, "Short EPG fallback failed for ${channel.displayName}: ${it.message}")
-                        }
-                        .getOrNull()
-                        ?.takeIf { it.isNotEmpty() }
+                    try {
+                        api.shortEpg(source, channel.streamId, PROVIDER_SHORT_EPG_LIMIT)
+                            .takeIf { it.isNotEmpty() }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: Exception) {
+                        // Network exception messages can contain provider credentials/URLs.
+                        Log.w(TAG, "Short EPG fallback failed: ${error.javaClass.simpleName}")
+                        null
+                    }
                 }.orEmpty()
                 if (listings.isEmpty()) continue
 
@@ -362,18 +384,25 @@ class EpgRepository(
                 }
                 if (programmes.isEmpty()) continue
 
-                ensureHardWriteReserve()
-                programmeDao.upsertAll(programmes)
-                aliasDao.upsertAll(
-                    listOf(
-                        EpgChannelAlias(
-                            feedId = feed.id,
-                            epgId = syntheticId,
-                            displayName = variants.first().displayName,
-                            normalizedKey = groupKey,
-                        ),
-                    ),
-                )
+                try {
+                    database.withTransaction {
+                        // Space can fall while the request is in flight. Keep the existing
+                        // hard floor and commit programmes plus their alias together, or neither.
+                        ensureHardWriteReserve()
+                        programmeDao.upsertAll(programmes)
+                        aliasDao.upsertAll(
+                            listOf(EpgChannelAlias(
+                                feedId = feed.id,
+                                epgId = syntheticId,
+                                displayName = variants.first().displayName,
+                                normalizedKey = groupKey,
+                            )),
+                        )
+                    }
+                } catch (_: StorageReserveException) {
+                    Log.w(TAG, "Short EPG refresh deferred: storage reserve; cached guide retained")
+                    return written
+                }
                 written += programmes.size
                 Log.i(TAG, "Short EPG fallback populated ${programmes.size} rows for ${variants.first().displayName}")
             }
