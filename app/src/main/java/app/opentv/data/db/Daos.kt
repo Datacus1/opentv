@@ -9,6 +9,8 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.RawQuery
+import androidx.sqlite.db.SupportSQLiteQuery
 import androidx.room.Transaction
 import androidx.room.Update
 import androidx.room.Upsert
@@ -371,6 +373,9 @@ interface EpgFeedDao {
 
 @Dao
 interface EpgChannelAliasDao {
+    @Query("SELECT * FROM epg_channels")
+    suspend fun allForAudit(): List<EpgChannelAlias>
+
     @Query(
         """
         SELECT c.* FROM epg_channels c
@@ -398,6 +403,21 @@ interface EpgChannelAliasDao {
 
 @Dao
 interface ProgrammeDao {
+    @RawQuery
+    suspend fun existingProgrammeKeys(query: SupportSQLiteQuery): List<GuideProgrammeKey>
+
+    /** Aggregate identities/times only: safe to export without provider configuration. */
+    @Query("""
+        SELECT feedId, epgChannelId, COUNT(*) AS totalRows,
+          SUM(CASE WHEN startUtcMillis <= :now AND endUtcMillis > :now THEN 1 ELSE 0 END) AS currentRows,
+          SUM(CASE WHEN startUtcMillis > :now THEN 1 ELSE 0 END) AS upcomingRows,
+          SUM(CASE WHEN endUtcMillis > :now AND startUtcMillis < :now + 43200000 THEN 1 ELSE 0 END) AS visibleRows,
+          MAX(endUtcMillis) AS lastEndMillis,
+          MIN(CASE WHEN startUtcMillis > :now THEN startUtcMillis ELSE NULL END) AS nextStartMillis
+        FROM programmes GROUP BY feedId, epgChannelId
+    """)
+    suspend fun guideCoverage(now: Long): List<GuideCoverageRow>
+
     /**
      * The guide grid: everything overlapping the visible window.
      *
@@ -554,6 +574,19 @@ interface ProgrammeDao {
     )
     suspend fun deleteFarthestFutureBatch(limit: Int): Int
 }
+
+data class GuideProgrammeKey(val epgChannelId: String, val startUtcMillis: Long)
+
+data class GuideCoverageRow(
+    val feedId: Long,
+    val epgChannelId: String,
+    val totalRows: Int,
+    val currentRows: Int,
+    val upcomingRows: Int,
+    val lastEndMillis: Long,
+    val nextStartMillis: Long?,
+    val visibleRows: Int = 0,
+)
 
 @Dao
 interface MovieDao {

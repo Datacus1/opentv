@@ -71,6 +71,13 @@
           trade-off is documented in docs/PRIVACY.md.
         -->
 
+        <receiver
+            android:name=".data.repo.GuideAuditReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter><action android:name="app.opentv.GUIDE_AUDIT" /></intent-filter>
+        </receiver>
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

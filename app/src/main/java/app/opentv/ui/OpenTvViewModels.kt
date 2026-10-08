@@ -28,6 +28,7 @@ import app.opentv.data.repo.CatalogRepository
 import app.opentv.data.repo.GenreGroup
 import app.opentv.data.repo.MovieVariantGroup
 import app.opentv.data.repo.PersonTitle
+import app.opentv.data.work.GuideRecoveryWorker
 import app.opentv.data.repo.distinctByQuality
 import app.opentv.R
 import app.opentv.pairing.ManagerServer
@@ -38,6 +39,7 @@ import app.opentv.sync.SyncPosition
 import app.opentv.sync.SyncServer
 import kotlinx.serialization.json.Json
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.FlowPreview
 import android.util.Log
 import app.opentv.core.StatusBus
@@ -122,6 +124,16 @@ class SourcesViewModel(app: Application) : AndroidViewModel(app) {
                 return@launch
             }
 
+            if (!graph.epgRepository.prepareStorage()) {
+                GuideRecoveryWorker.enqueue(getApplication())
+                _ui.value = _ui.value.copy(
+                    syncing = false,
+                    syncMessage = "Source saved. Channel and guide loading paused by low storage — " +
+                        "retrying guide updates automatically.",
+                )
+                onDone(false)
+                return@launch
+            }
             _ui.value = _ui.value.copy(syncMessage = "Loading channels…")
             val now = System.currentTimeMillis()
             // Load live channels first and get the user watching straight away. Movies, series and
@@ -151,17 +163,29 @@ class SourcesViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 _ui.value = _ui.value.copy(
                     syncMessage = when {
+                        summary.storageDeferred ->
+                            "Channels ready. Guide updates paused by low storage — retrying automatically."
+                        summary.feedsFailed > 0 || graph.epgRepository.health.value.failed ->
+                            "Channels ready. Guide update incomplete — cached listings retained; " +
+                                "retrying automatically."
                         summary.channelsMatched > 0 ->
-                            "Guide ready — matched ${summary.channelsMatched} of " +
+                            "Guide matching complete — matched ${summary.channelsMatched} of " +
                                 "${summary.channelsTotal} channels."
                         else ->
                             "Channels ready. No guide data matched yet — add a free guide " +
                                 "under Guide settings."
                     },
                 )
+                if (summary.storageDeferred || summary.feedsFailed > 0) {
+                    GuideRecoveryWorker.enqueue(getApplication())
+                }
                 // Book any new series-link airings the fresh guide just revealed.
                 runCatching { graph.recordingEngine.rescanSeriesRules() }
-            }.onFailure { Log.w("OpenTV", "Background VOD/guide load failed", it) }
+            }.onFailure {
+                if (it is CancellationException) throw it
+                Log.w("OpenTV", "Background guide load failed: ${it.javaClass.simpleName}")
+                GuideRecoveryWorker.enqueue(getApplication())
+            }
         }
     }
 
@@ -189,6 +213,14 @@ class SourcesViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshAll() {
         viewModelScope.launch {
             _ui.value = _ui.value.copy(syncing = true, syncMessage = "Refreshing…")
+            if (!graph.epgRepository.prepareStorage()) {
+                GuideRecoveryWorker.enqueue(getApplication())
+                _ui.value = _ui.value.copy(
+                    syncing = false,
+                    syncMessage = "Refresh paused by low storage — retrying guide updates automatically.",
+                )
+                return@launch
+            }
             val now = System.currentTimeMillis()
             var channels = 0
             var problems = 0
@@ -200,10 +232,15 @@ class SourcesViewModel(app: Application) : AndroidViewModel(app) {
             }
             val summary = graph.epgRepository.syncAll(now, force = true)
             problems += summary.feedsFailed
+            if (summary.storageDeferred || summary.feedsFailed > 0) {
+                GuideRecoveryWorker.enqueue(getApplication())
+            }
             runCatching { graph.recordingEngine.rescanSeriesRules() }
             _ui.value = _ui.value.copy(
                 syncing = false,
-                syncMessage = if (problems == 0) {
+                syncMessage = if (summary.storageDeferred) {
+                    "Refreshed $channels channels. Guide updates paused by low storage — retrying automatically."
+                } else if (problems == 0) {
                     "Refreshed $channels channels, guide matched " +
                         "${summary.channelsMatched} of ${summary.channelsTotal}."
                 } else {
@@ -451,9 +488,8 @@ class ChannelsViewModel(app: Application) : AndroidViewModel(app) {
             // Walk every variant's guide-id candidates (override → provider → matched)
             // and use the first that actually has programmes. An id that never lights up
             // must not shadow a sibling variant whose id does.
-            val list = variants
-                .flatMap { it.epgCandidates }
-                .firstNotNullOfOrNull { id -> byEpgChannel[id] }
+            val list = app.opentv.data.repo.chooseGuideCandidate(group, byEpgChannel, now)
+                ?.let { id -> byEpgChannel[id] }
                 ?.sortedBy { it.startUtcMillis }
                 .orEmpty()
 
@@ -649,7 +685,7 @@ class ChannelsViewModel(app: Application) : AndroidViewModel(app) {
     private companion object {
         const val GUIDE_LOOKAHEAD_MILLIS = 24 * 60 * 60 * 1000L  // a full day fits the grid
         const val DAY_MILLIS = 24 * 60 * 60 * 1000L
-        const val GUIDE_MAX_DAYS = 6  // browse up to a week out, matching typical XMLTV depth
+        const val GUIDE_MAX_DAYS = 1  // tomorrow stays inside the two-elapsed-day cache horizon
         const val HALF_HOUR_MILLIS = 30 * 60 * 1000L
     }
 }
@@ -698,13 +734,36 @@ class EpgViewModel(app: Application) : AndroidViewModel(app) {
         if (_ui.value.syncing) return
         viewModelScope.launch {
             _ui.value = _ui.value.copy(syncing = true, statusLine = "Downloading guides…")
-            val summary = graph.epgRepository.syncAll(System.currentTimeMillis(), force = true)
-            _ui.value = _ui.value.copy(
-                syncing = false,
-                statusLine = "Guide matched ${summary.channelsMatched} of " +
-                    "${summary.channelsTotal} channels" +
-                    if (summary.feedsFailed > 0) " · ${summary.feedsFailed} feed(s) failed" else "",
-            )
+            try {
+                val summary = graph.epgRepository.syncAll(System.currentTimeMillis(), force = true)
+                if (summary.storageDeferred || summary.feedsFailed > 0) {
+                    GuideRecoveryWorker.enqueue(getApplication())
+                }
+                _ui.value = _ui.value.copy(
+                    syncing = false,
+                    statusLine = if (summary.storageDeferred) {
+                        "Guide updates paused by low storage — retrying automatically."
+                    } else if (graph.epgRepository.health.value.failed) {
+                        "Guide update incomplete — cached listings retained; retrying automatically."
+                    } else {
+                        "Guide matched ${summary.channelsMatched} of " +
+                            "${summary.channelsTotal} channels" +
+                            if (summary.feedsFailed > 0) {
+                                " · ${summary.feedsFailed} feed(s) failed; retrying automatically"
+                            } else ""
+                    },
+                )
+            } catch (cancelled: CancellationException) {
+                _ui.value = _ui.value.copy(syncing = false)
+                throw cancelled
+            } catch (error: Exception) {
+                Log.w("OpenTV", "Guide settings refresh deferred: ${error.javaClass.simpleName}")
+                GuideRecoveryWorker.enqueue(getApplication())
+                _ui.value = _ui.value.copy(
+                    syncing = false,
+                    statusLine = "Guide update failed — cached listings retained; retrying automatically.",
+                )
+            }
         }
     }
 }

@@ -86,6 +86,7 @@ object EpgMatcher {
             var found: String? = null
             for (alias in sortedKeys) {
                 val hit = (alias.key.length >= MIN_KEY_LENGTH) &&
+                    (groupKey.contains("plus") == alias.key.contains("plus")) &&
                     (alias.key.startsWith(groupKey) || groupKey.startsWith(alias.key))
                 if (!hit) continue
                 if (found == null) {
@@ -145,12 +146,12 @@ object EpgMatcher {
      * transport revision while retaining the full channel id, including East/West/Pacific.
      */
     private fun canonicalGuideIdKey(id: String): String {
-        val withoutFeedRevision = GUIDE_ID_FEED_SUFFIX.replace(id.trim(), "")
+        val withoutFeedRevision = GUIDE_ID_FEED_SUFFIX.replace(id.trim()) { ".${it.groupValues[1]}" }
         return ChannelNameNormalizer.normalize(withoutFeedRevision).groupKey
     }
 
     private val GUIDE_ID_FEED_SUFFIX = Regex(
-        pattern = "[._-](?:us|ca|uk|gb|au|nz)[0-9]*$",
+        pattern = "[._-](us|ca|uk|gb|au|nz)[0-9]*$",
         option = RegexOption.IGNORE_CASE,
     )
 

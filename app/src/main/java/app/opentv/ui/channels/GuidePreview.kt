@@ -41,6 +41,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import app.opentv.ui.ChannelsViewModel
+import app.opentv.data.repo.GuideHealth
 import coil.compose.AsyncImage
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -70,6 +71,7 @@ fun GuidePreview(
     row: ChannelsViewModel.Row?,
     nowMillis: Long,
     previewPlayer: ExoPlayer?,
+    guideHealth: GuideHealth = GuideHealth(),
     modifier: Modifier = Modifier,
 ) {
     Row(
@@ -186,7 +188,7 @@ fun GuidePreview(
                 }
             } else {
                 Text(
-                    stringResource(R.string.guide_no_info_channel),
+                    guideHealth.emptyListingMessage(stringResource(R.string.guide_no_info_channel)),
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

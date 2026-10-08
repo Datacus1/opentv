@@ -38,6 +38,13 @@ class SyncWorker(
         val sources = graph.sourceRepository.enabled()
         if (sources.isEmpty()) return Result.success()
 
+        // A catalogue import also grows SQLite. Do not mutate it first and only then discover
+        // the guide reserve is unavailable; recovery is guide-only and survives process death.
+        if (!graph.epgRepository.prepareStorage()) {
+            GuideRecoveryWorker.enqueue(applicationContext)
+            return Result.retry()
+        }
+
         var anyFailed = false
 
         for (source in sources) {
@@ -55,7 +62,10 @@ class SyncWorker(
         // Guides sync as one pass across every enabled feed — provider guides, built-in
         // free sources and user URLs merge into a single guide, then the matcher runs.
         val summary = graph.epgRepository.syncAll(now)
-        if (summary.feedsFailed > 0) anyFailed = true
+        if (summary.feedsFailed > 0 || summary.storageDeferred || summary.retryNeeded) anyFailed = true
+        if (summary.storageDeferred || summary.feedsFailed > 0 || summary.retryNeeded) {
+            GuideRecoveryWorker.enqueue(applicationContext)
+        }
         Log.i(
             TAG,
             "Guide: ${summary.programmesWritten} programmes from ${summary.feedsSucceeded} " +

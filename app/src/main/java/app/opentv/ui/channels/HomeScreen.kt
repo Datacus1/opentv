@@ -137,6 +137,7 @@ fun HomeScreen(
     val selectedCategory by viewModel.selectedCategory.collectAsState()
     val favouritesOnly by viewModel.favouritesOnly.collectAsState()
     val sources by viewModel.sources.collectAsState()
+    val guideHealth by graph.epgRepository.health.collectAsState()
     val selectedSource by viewModel.selectedSource.collectAsState()
     val windowStart by viewModel.windowStartMillis.collectAsState()
     // How many days ahead the guide is scrolled (0 = live now). Drives the ‹ Today › nav.
@@ -592,7 +593,17 @@ fun HomeScreen(
                     row = highlightedRow,
                     nowMillis = nowMillis,
                     previewPlayer = if (previewVisible && screenResumed) previewController.player else null,
+                    guideHealth = guideHealth,
                 )
+                guideHealth.notice()?.let { notice ->
+                    // Display-only; preserve the guide header's remote focus boundary.
+                    Text(
+                        notice,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 3.dp),
+                    )
+                }
                 // Shared by both layouts: focus follows the highlight and collapses the rail; LEFT
                 // from the leftmost element reopens the rail (consumed only when it was hidden).
                 val onFocusChannel: (ChannelsViewModel.Row) -> Unit = {
@@ -631,6 +642,7 @@ fun HomeScreen(
                 } else {
                     GuideGrid(
                         rows = rows,
+                        guideHealth = guideHealth,
                         windowStartMillis = windowStart,
                         dayOffset = guideDayOffset,
                         selectedKey = highlightedRow?.key,

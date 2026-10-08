@@ -63,6 +63,7 @@ import app.opentv.R
 import app.opentv.data.model.Channel
 import app.opentv.data.model.Programme
 import app.opentv.data.model.shownName
+import app.opentv.data.repo.GuideHealth
 import app.opentv.ui.ChannelsViewModel
 import coil.compose.AsyncImage
 import java.text.SimpleDateFormat
@@ -103,6 +104,7 @@ fun GuideGrid(
     // left-navigation carry focus into the already-visible rail.
     onExitLeftFromChannel: () -> Boolean = { false },
     dayOffset: Int = 0,
+    guideHealth: GuideHealth = GuideHealth(),
     modifier: Modifier = Modifier,
 ) {
     val scroll = rememberScrollState()
@@ -151,6 +153,7 @@ fun GuideGrid(
                     onProgramme = { programme -> onProgramme(row, programme) },
                     onToggleFavourite = { onToggleFavourite(row) },
                     onExitLeft = onExitLeftFromChannel,
+                    guideHealth = guideHealth,
                 )
             }
         }
@@ -398,6 +401,7 @@ private fun GuideRow(
     onProgramme: (Programme) -> Unit,
     onToggleFavourite: () -> Unit = {},
     onExitLeft: () -> Boolean = { false },
+    guideHealth: GuideHealth = GuideHealth(),
 ) {
     // Focus (the d-pad border) just moves the highlight. Selection (the filled cell) is the
     // channel the preview is playing — it only changes when you press OK.
@@ -522,7 +526,7 @@ private fun GuideRow(
                     contentAlignment = Alignment.CenterStart,
                 ) {
                     Text(
-                        stringResource(R.string.guide_no_info),
+                        guideHealth.emptyListingMessage(stringResource(R.string.guide_no_info)),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

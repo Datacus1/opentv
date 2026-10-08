@@ -9,6 +9,7 @@ import android.content.Context
 import android.os.StatFs
 import android.util.Log
 import androidx.room.withTransaction
+import androidx.sqlite.db.SimpleSQLiteQuery
 import app.opentv.data.db.ChannelDao
 import app.opentv.data.db.EpgChannelAliasDao
 import app.opentv.data.db.EpgFeedDao
@@ -31,6 +32,9 @@ import java.util.zip.GZIPInputStream
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -59,6 +63,9 @@ class EpgRepository(
     private val http: OkHttpClient,
     /** False while live playback or recording makes storage maintenance undesirable. */
     private val maintenanceAllowed: suspend () -> Boolean = { true },
+    private val recoverStorage: (suspend () -> Boolean)? = null,
+    private val rowLimitPerFeed: Int = MAX_PROGRAMMES_PER_FEED,
+    private val rowLimitTotal: Int = MAX_PROGRAMMES_TOTAL,
 ) {
 
     data class SyncSummary(
@@ -67,6 +74,8 @@ class EpgRepository(
         val programmesWritten: Int,
         val channelsMatched: Int,
         val channelsTotal: Int,
+        val storageDeferred: Boolean = false,
+        val retryNeeded: Boolean = false,
     )
 
     data class StorageDiagnostics(
@@ -77,6 +86,7 @@ class EpgRepository(
     )
 
     private data class FeedCoverage(val populatedChannels: Int, val coveredChannels: Int)
+    private data class ShortGuideSummary(val written: Int, val retryNeeded: Boolean)
 
     private sealed interface FeedResult {
         data class Success(
@@ -94,6 +104,47 @@ class EpgRepository(
     private val mutationMutex = Mutex()
     private val databaseFile: File = context.getDatabasePath(DATABASE_NAME)
     private val walFile: File = File(databaseFile.path + "-wal")
+    private val recovery = GuideStorageRecovery(context, maintenanceAllowed)
+    private val _health = MutableStateFlow(GuideHealth(
+        storageBlocked = availableBytes() < SOFT_FREE_RESERVE_BYTES,
+        freeBytes = availableBytes(),
+    ))
+    val health: StateFlow<GuideHealth> = _health.asStateFlow()
+    private var maintenanceBatchesRemaining = 0
+
+    /** No database mutation; disposable caches may be reclaimed while playback is idle. */
+    suspend fun prepareStorage(): Boolean = withContext(Dispatchers.IO) {
+        if (availableBytes() < SOFT_FREE_RESERVE_BYTES) {
+            if (recoverStorage != null) recoverStorage.invoke() else recovery.recover()
+        }
+        val free = availableBytes()
+        val ready = free >= SOFT_FREE_RESERVE_BYTES
+        _health.value = _health.value.copy(storageBlocked = !ready, freeBytes = free)
+        ready
+    }
+
+    /** Offline, independently scheduled maintenance; never depends on a successful feed request. */
+    suspend fun maintainCache(nowUtcMillis: Long): Boolean = withContext(Dispatchers.IO) {
+        mutationMutex.withLock {
+            if (!prepareStorage()) return@withLock false
+            maintenanceBatchesRemaining = MAINTENANCE_MAX_BATCHES
+            resumePendingDeletionsLocked()
+            runBoundedRetentionLocked(nowUtcMillis)
+            truncateWalWhenIdle()
+            true
+        }
+    }
+
+    suspend fun hasGuideSources(): Boolean = sourceDao.enabled().isNotEmpty() || feedDao.enabled().isNotEmpty()
+
+    /** Diagnostic metadata only; never serializes provider models, URLs, titles or credentials. */
+    suspend fun auditChannels(now: Long): List<GuideChannelAudit> = withContext(Dispatchers.IO) {
+        mutationMutex.withLock {
+            GuideCoverageAudit.audit(channelDao.allForMatching(), feedDao.all(),
+                aliasDao.allForAudit(), programmeDao.guideCoverage(now),
+                availableBytes() < SOFT_FREE_RESERVE_BYTES)
+        }
+    }
 
     // ---- Reads -----------------------------------------------------------------------------
 
@@ -140,6 +191,8 @@ class EpgRepository(
     /** Persist the tombstone first; bounded cleanup can safely resume after cancellation/reboot. */
     suspend fun removeFeed(feed: EpgFeed) = withContext(Dispatchers.IO) {
         mutationMutex.withLock {
+            if (!prepareStorage()) return@withLock
+            maintenanceBatchesRemaining = MAINTENANCE_MAX_BATCHES
             feedDao.markDeleting(feed.id)
             cleanupDeletedFeedLocked(feed.id)
         }
@@ -147,6 +200,8 @@ class EpgRepository(
 
     suspend fun removeProviderFeed(sourceId: Long) = withContext(Dispatchers.IO) {
         mutationMutex.withLock {
+            if (!prepareStorage()) return@withLock
+            maintenanceBatchesRemaining = MAINTENANCE_MAX_BATCHES
             feedDao.forProvider(sourceId)?.let { feed ->
                 feedDao.markDeleting(feed.id)
                 cleanupDeletedFeedLocked(feed.id)
@@ -156,6 +211,7 @@ class EpgRepository(
 
     suspend fun ensureFeeds() = withContext(Dispatchers.IO) {
         mutationMutex.withLock {
+            if (!prepareStorage()) return@withLock
             resumePendingDeletionsLocked()
             ensureFeedsLocked()
         }
@@ -207,7 +263,7 @@ class EpgRepository(
 
     private suspend fun resumePendingDeletionsLocked() {
         if (!maintenanceAllowed() || availableBytes() < SOFT_FREE_RESERVE_BYTES) return
-        for (feed in feedDao.pendingDeletion()) {
+        for (feed in feedDao.pendingDeletion().take(1)) {
             if (!cleanupDeletedFeedLocked(feed.id)) return
         }
     }
@@ -215,15 +271,21 @@ class EpgRepository(
     /** Returns true only when all programme and alias rows plus the feed row are gone. */
     private suspend fun cleanupDeletedFeedLocked(feedId: Long): Boolean {
         if (!maintenanceAllowed() || availableBytes() < SOFT_FREE_RESERVE_BYTES) return false
-        while (true) {
+        while (maintenanceBatchesRemaining > 0) {
             if (!maintenanceAllowed() || availableBytes() < HARD_FREE_FLOOR_BYTES) return false
             val removed = programmeDao.deleteBatchForFeed(feedId, DELETE_BATCH_SIZE)
             if (removed == 0) break
+            maintenanceBatchesRemaining--
             checkpointIfWalLarge()
             yield()
         }
-        aliasDao.deleteForFeed(feedId)
-        feedDao.delete(feedId)
+        if (programmeDao.countForFeed(feedId) > 0) return false
+        if (!maintenanceAllowed() || availableBytes() < HARD_FREE_FLOOR_BYTES) return false
+        database.withTransaction {
+            ensureHardWriteReserve()
+            aliasDao.deleteForFeed(feedId)
+            feedDao.delete(feedId)
+        }
         return true
     }
 
@@ -234,10 +296,15 @@ class EpgRepository(
             mutationMutex.withLock {
                 // A deferral is read-only: do not grow the WAL with failure metadata, feed
                 // migrations or matching updates when storage is already below the reserve.
-                if (availableBytes() < SOFT_FREE_RESERVE_BYTES) {
+                if (!prepareStorage()) {
                     Log.w(TAG, "Guide refresh deferred: low free space; cached guide retained")
-                    return@withLock cachedSummary(0, feedDao.enabled().size, 0)
+                    return@withLock cachedSummary(0, 0, 0, nowUtcMillis, storageDeferred = true)
                 }
+                _health.value = _health.value.copy(refreshing = true)
+                try {
+                maintenanceBatchesRemaining = MAINTENANCE_MAX_BATCHES
+                // Cleanup precedes network work, so failed/offline feeds cannot prevent retention.
+                runBoundedRetentionLocked(nowUtcMillis)
                 resumePendingDeletionsLocked()
                 ensureFeedsLocked()
                 maybeAutoEnableRegionalFeedLocked()
@@ -264,10 +331,16 @@ class EpgRepository(
                     }
 
                     if (availableBytes() < SOFT_FREE_RESERVE_BYTES) {
-                        return@withLock cachedSummary(succeeded, failed + 1, written)
+                        _health.value = _health.value.copy(storageBlocked = true, freeBytes = availableBytes())
+                        return@withLock cachedSummary(succeeded, failed, written, nowUtcMillis, true)
                     }
 
-                    when (val result = syncFeed(feed, nowUtcMillis)) {
+                    val result = syncFeed(feed, nowUtcMillis)
+                    if (availableBytes() < SOFT_FREE_RESERVE_BYTES) {
+                        _health.value = _health.value.copy(storageBlocked = true, freeBytes = availableBytes())
+                        return@withLock cachedSummary(succeeded, failed, written, nowUtcMillis, true)
+                    }
+                    when (result) {
                         is FeedResult.Success -> {
                             succeeded++
                             written += result.programmes
@@ -293,7 +366,7 @@ class EpgRepository(
                         is FeedResult.Failed -> {
                             failed++
                             feedDao.markFailed(feed.id, nowUtcMillis, result.reason)
-                            Log.w(TAG, "Feed '${feed.name}' failed: ${result.reason}")
+                            Log.w(TAG, "Guide feed ${feed.id} failed: ${result.reason}")
                         }
                     }
                 }
@@ -302,35 +375,56 @@ class EpgRepository(
                 // bounded per-stream endpoint still has a schedule. FOX East is verified to need
                 // that fallback on this provider. This adds at most 100 rows per source and never
                 // downloads a second regional/national guide.
-                written += syncProviderShortEpgFallbacksLocked(nowUtcMillis, force)
+                val shortGuide = syncProviderShortEpgFallbacksLocked(nowUtcMillis, force)
+                written += shortGuide.written
 
                 if (availableBytes() < SOFT_FREE_RESERVE_BYTES) {
-                    return@withLock cachedSummary(succeeded, failed, written)
+                    _health.value = _health.value.copy(storageBlocked = true, freeBytes = availableBytes())
+                    return@withLock cachedSummary(succeeded, failed, written, nowUtcMillis, true)
                 }
                 runBoundedRetentionLocked(nowUtcMillis)
                 val (matched, total) = runMatcherLocked()
                 truncateWalWhenIdle()
                 logStorageState()
-                SyncSummary(succeeded, failed, written, matched, total)
+                _health.value = _health.value.copy(
+                    failed = failed > 0 || shortGuide.retryNeeded || feedDao.enabled().any { it.failureCount > 0 },
+                    freeBytes = availableBytes())
+                SyncSummary(succeeded, failed, written, matched, total, retryNeeded = _health.value.failed)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    _health.value = _health.value.copy(failed = true,
+                        storageBlocked = availableBytes() < SOFT_FREE_RESERVE_BYTES,
+                        freeBytes = availableBytes())
+                    throw error
+                } finally {
+                    _health.value = _health.value.copy(refreshing = false)
+                }
             }
         }
 
-    private suspend fun cachedSummary(succeeded: Int, failed: Int, written: Int): SyncSummary {
+    private suspend fun cachedSummary(succeeded: Int, failed: Int, written: Int,
+        now: Long, storageDeferred: Boolean = false): SyncSummary {
         val channels = channelDao.allForMatching()
-        val populated = programmeDao.channelIdsWithProgrammesFromEnabledFeeds().toHashSet()
+        val enabled = feedDao.enabled().map { it.id }.toSet()
+        val populated = programmeDao.guideCoverage(now)
+            .filter { it.feedId in enabled && (it.currentRows > 0 || it.upcomingRows > 0) }
+            .map { it.epgChannelId }.toHashSet()
         return SyncSummary(
             succeeded, failed, written,
             channels.count { channel -> channel.epgCandidates.any { it in populated } },
             channels.size,
+            storageDeferred,
         )
     }
 
     private suspend fun syncProviderShortEpgFallbacksLocked(
         nowUtcMillis: Long,
         force: Boolean,
-    ): Int {
+    ): ShortGuideSummary {
         var written = 0
-        if (availableBytes() < SOFT_FREE_RESERVE_BYTES) return written
+        var retryNeeded = false
+        if (availableBytes() < SOFT_FREE_RESERVE_BYTES) return ShortGuideSummary(written, true)
         val oldestAllowed = nowUtcMillis - RETENTION_PAST_MILLIS
         val newestAllowed = nowUtcMillis + RETENTION_FUTURE_MILLIS
 
@@ -341,7 +435,7 @@ class EpgRepository(
                 .filter { it.groupKey in PROVIDER_SHORT_EPG_GROUP_KEYS }
                 .sortedByDescending { it.qualityRank }
             for ((groupKey, variants) in candidates.groupBy { it.groupKey }) {
-                if (availableBytes() < SOFT_FREE_RESERVE_BYTES) return written
+                if (availableBytes() < SOFT_FREE_RESERVE_BYTES) return ShortGuideSummary(written, true)
                 val syntheticId = providerShortEpgId(source.id, groupKey)
                 val cachedThrough = programmeDao.upcoming(
                     syntheticId,
@@ -351,7 +445,13 @@ class EpgRepository(
                 if (!force && cachedThrough >= nowUtcMillis + MIN_CACHED_FUTURE_MILLIS) {
                     continue
                 }
+                if (cachedThrough == 0L && (programmeDao.countForFeed(feed.id) >= rowLimitPerFeed ||
+                        programmeDao.countAll() >= rowLimitTotal)) {
+                    retryNeeded = true
+                    continue
+                }
 
+                var variantRequestFailed = false
                 val listings = variants.firstNotNullOfOrNull { channel ->
                     try {
                         api.shortEpg(source, channel.streamId, PROVIDER_SHORT_EPG_LIMIT)
@@ -361,13 +461,17 @@ class EpgRepository(
                     } catch (error: Exception) {
                         // Network exception messages can contain provider credentials/URLs.
                         Log.w(TAG, "Short EPG fallback failed: ${error.javaClass.simpleName}")
+                        variantRequestFailed = true
                         null
                     }
                 }.orEmpty()
-                if (listings.isEmpty()) continue
+                if (listings.isEmpty()) {
+                    retryNeeded = retryNeeded || variantRequestFailed
+                    continue
+                }
 
                 val programmes = listings.mapNotNull { item ->
-                    if (item.endUtcMillis < oldestAllowed || item.startUtcMillis > newestAllowed) {
+                    if (item.endUtcMillis <= oldestAllowed || item.startUtcMillis >= newestAllowed) {
                         return@mapNotNull null
                     }
                     sanitizeProgramme(
@@ -383,6 +487,13 @@ class EpgRepository(
                     )
                 }
                 if (programmes.isEmpty()) continue
+                if (!hasRowCapacity(feed.id, programmes.map {
+                    GuideProgrammeSelector.Key(it.epgChannelId, it.startUtcMillis)
+                }.toSet())) {
+                    _health.value = _health.value.copy(failed = true)
+                    retryNeeded = true
+                    continue
+                }
 
                 try {
                     database.withTransaction {
@@ -401,13 +512,13 @@ class EpgRepository(
                     }
                 } catch (_: StorageReserveException) {
                     Log.w(TAG, "Short EPG refresh deferred: storage reserve; cached guide retained")
-                    return written
+                    return ShortGuideSummary(written, true)
                 }
                 written += programmes.size
                 Log.i(TAG, "Short EPG fallback populated ${programmes.size} rows for ${variants.first().displayName}")
             }
         }
-        return written
+        return ShortGuideSummary(written, retryNeeded)
     }
 
     private suspend fun coverageFor(feedId: Long, nowUtcMillis: Long): FeedCoverage {
@@ -427,12 +538,39 @@ class EpgRepository(
         val batch = ArrayList<Programme>(BATCH_SIZE)
         val aliases = LinkedHashMap<String, EpgChannelAlias>(512)
         var written = 0
-        var accepted = 0
         var truncated = false
         val oldestAllowed = nowUtcMillis - RETENTION_PAST_MILLIS
         val newestAllowed = nowUtcMillis + RETENTION_FUTURE_MILLIS
 
         return try {
+            // Two bounded streaming passes trade bandwidth for fair coverage without keeping
+            // 150k full descriptions in heap or staging another database/XML file on this Shield.
+            // The first pass is read-only and keeps compact identities/times; incomplete XML
+            // never begins ingestion. Reserve current/nearest-next slots for every guide channel.
+            val selector = GuideProgrammeSelector(nowUtcMillis, oldestAllowed, newestAllowed,
+                minOf(rowLimitPerFeed, rowLimitTotal / feedDao.enabled().size.coerceAtLeast(1)), MAX_ALIASES_PER_FEED)
+            openFeedStream(feed).use { stream ->
+                XmltvParser.parse(stream, feed.id, onChannelAlias = { rawId, rawName ->
+                    val id = rawId.take(MAX_EPG_ID_CHARS)
+                    if (aliases.size >= MAX_ALIASES_PER_FEED && id !in aliases) truncated = true
+                    else {
+                        val name = (rawName ?: id).take(MAX_TITLE_CHARS)
+                        aliases[id] = EpgChannelAlias(feed.id, id, name,
+                            ChannelNameNormalizer.normalize(name).groupKey)
+                    }
+                }) { raw -> selector.offer(raw.copy(epgChannelId = raw.epgChannelId.take(MAX_EPG_ID_CHARS))) }
+            }
+            val selected = selector.selected()
+            truncated = truncated || selector.truncated(selected)
+            if (selected.isEmpty()) return FeedResult.Failed("Downloaded, but contained no programmes in the usable guide window.")
+            if (availableBytes() < SOFT_FREE_RESERVE_BYTES) throw StorageReserveException("Refresh deferred to preserve free storage.")
+            // Count identity changes before any writes. A cap must not become an eventual target
+            // when idle maintenance is paused: updating existing rows is fine, growing past either
+            // cap is deferred. Working cache stays intact until idle cleanup creates reusable room.
+            if (!hasRowCapacity(feed.id, selected)) {
+                return FeedResult.Failed("Guide cache needs idle maintenance before adding new listings; cached listings retained.")
+            }
+            val seen = HashSet<GuideProgrammeSelector.Key>()
             openFeedStream(feed).use { stream ->
                 val stats = XmltvParser.parse(
                     input = stream,
@@ -452,15 +590,10 @@ class EpgRepository(
                         }
                     },
                     onProgramme = { raw ->
-                        if (raw.endUtcMillis < oldestAllowed || raw.startUtcMillis > newestAllowed) {
-                            return@parse
-                        }
-                        if (accepted >= MAX_PROGRAMMES_PER_FEED) {
-                            truncated = true
-                            return@parse
-                        }
+                        if (raw.endUtcMillis <= oldestAllowed || raw.startUtcMillis >= newestAllowed) return@parse
+                        val key = GuideProgrammeSelector.Key(raw.epgChannelId.take(MAX_EPG_ID_CHARS), raw.startUtcMillis)
+                        if (key !in selected || !seen.add(key)) return@parse
                         batch += sanitizeProgramme(raw, nowUtcMillis)
-                        accepted++
                         if (batch.size >= BATCH_SIZE) {
                             // StatFs is intentionally checked once per transaction rather than
                             // once per programme; a large XMLTV file can contain hundreds of
@@ -494,8 +627,15 @@ class EpgRepository(
                     )
                 }
 
+                // A changing provider between passes is not a complete replacement snapshot.
+                // Keep cached rows/aliases and retry rather than reconcile missing identities.
+                if (seen.size != selected.size) return FeedResult.Failed("Guide changed during refresh; cached listings retained.")
+
                 // Aliases are small enough to replace atomically, and only after the XML completed.
-                if (aliases.isNotEmpty()) aliasDao.replaceForFeed(feed.id, aliases.values.toList())
+                if (aliases.isNotEmpty()) database.withTransaction {
+                    ensureHardWriteReserve()
+                    aliasDao.replaceForFeed(feed.id, aliases.values.toList())
+                }
                 FeedResult.Success(written, stats.channelCount, truncated)
             }
         } catch (e: CancellationException) {
@@ -505,7 +645,7 @@ class EpgRepository(
         } catch (e: Exception) {
             // No cleanup here: the last complete cache is still present. A later complete refresh
             // reconciles any partial newer rows through lastSeenSyncMillis.
-            FeedResult.Failed(e.message ?: "Download failed.")
+            FeedResult.Failed("Download failed (${e.javaClass.simpleName}); cached listings retained.")
         }
     }
 
@@ -518,6 +658,22 @@ class EpgRepository(
             iconUrl = programme.iconUrl?.take(MAX_URL_CHARS),
             lastSeenSyncMillis = syncMillis,
         )
+
+    private suspend fun hasRowCapacity(feedId: Long, selected: Set<GuideProgrammeSelector.Key>): Boolean {
+        var existing = 0
+        for (keys in selected.toList().chunked(250)) {
+            val clauses = keys.joinToString(" OR ") { "(feedId = ? AND epgChannelId = ? AND startUtcMillis = ?)" }
+            val args = ArrayList<Any>(keys.size * 3).apply {
+                keys.forEach { add(feedId); add(it.channel); add(it.start) }
+            }
+            existing += programmeDao.existingProgrammeKeys(SimpleSQLiteQuery(
+                "SELECT epgChannelId, startUtcMillis FROM programmes WHERE $clauses",
+                args.toTypedArray())).size
+        }
+        val newRows = selected.size - existing
+        return programmeDao.countForFeed(feedId).toLong() + newRows <= rowLimitPerFeed &&
+            programmeDao.countAll().toLong() + newRows <= rowLimitTotal
+    }
 
     private suspend fun runBoundedRetentionLocked(nowUtcMillis: Long) {
         if (!maintenanceAllowed() || availableBytes() < SOFT_FREE_RESERVE_BYTES) return
@@ -540,29 +696,32 @@ class EpgRepository(
     }
 
     private suspend fun deleteFeedOverflowLocked(feedId: Long) {
-        while (maintenanceAllowed() && availableBytes() >= HARD_FREE_FLOOR_BYTES) {
+        while (maintenanceBatchesRemaining > 0 && maintenanceAllowed() && availableBytes() >= HARD_FREE_FLOOR_BYTES) {
             val excess = programmeDao.countForFeed(feedId) - MAX_PROGRAMMES_PER_FEED
             if (excess <= 0) return
             programmeDao.deleteFarthestFutureBatchForFeed(feedId, minOf(excess, DELETE_BATCH_SIZE))
+            maintenanceBatchesRemaining--
             checkpointIfWalLarge()
             yield()
         }
     }
 
     private suspend fun deleteGlobalOverflowLocked() {
-        while (maintenanceAllowed() && availableBytes() >= HARD_FREE_FLOOR_BYTES) {
+        while (maintenanceBatchesRemaining > 0 && maintenanceAllowed() && availableBytes() >= HARD_FREE_FLOOR_BYTES) {
             val excess = programmeDao.countAll() - MAX_PROGRAMMES_TOTAL
             if (excess <= 0) return
             programmeDao.deleteFarthestFutureBatch(minOf(excess, DELETE_BATCH_SIZE))
+            maintenanceBatchesRemaining--
             checkpointIfWalLarge()
             yield()
         }
     }
 
     private suspend fun deleteInBatches(delete: suspend () -> Int) {
-        while (maintenanceAllowed() && availableBytes() >= HARD_FREE_FLOOR_BYTES) {
+        while (maintenanceBatchesRemaining > 0 && maintenanceAllowed() && availableBytes() >= HARD_FREE_FLOOR_BYTES) {
             val removed = delete()
             if (removed == 0) return
+            maintenanceBatchesRemaining--
             checkpointIfWalLarge()
             yield()
         }
@@ -576,7 +735,7 @@ class EpgRepository(
 
     private fun availableBytes(): Long = runCatching {
         StatFs(context.dataDir.absolutePath).availableBytes
-    }.getOrDefault(Long.MAX_VALUE)
+    }.getOrDefault(0L)
 
     private fun checkpointIfWalLarge() {
         if (walFile.length() < WAL_CHECKPOINT_BYTES) return
@@ -640,7 +799,13 @@ class EpgRepository(
     // ---- Matching --------------------------------------------------------------------------
 
     suspend fun runMatcher(): Pair<Int, Int> = withContext(Dispatchers.IO) {
-        mutationMutex.withLock { runMatcherLocked() }
+        mutationMutex.withLock {
+            if (!prepareStorage()) {
+                val cached = cachedSummary(0, 0, 0, System.currentTimeMillis())
+                return@withLock cached.channelsMatched to cached.channelsTotal
+            }
+            runMatcherLocked()
+        }
     }
 
     private suspend fun runMatcherLocked(): Pair<Int, Int> {
@@ -658,7 +823,10 @@ class EpgRepository(
             // an in-place upgrade even before the next catalogue refresh rewrites stored keys.
             val currentGroupKey = ChannelNameNormalizer.normalize(channel.name).groupKey
             val newMatch = index.matchProvider(currentGroupKey, channel.epgChannelId)
-            if (newMatch != channel.matchedEpgId) channelDao.setMatchedEpgId(channel.id, newMatch)
+            if (newMatch != channel.matchedEpgId) {
+                ensureHardWriteReserve()
+                channelDao.setMatchedEpgId(channel.id, newMatch)
+            }
             if (
                 channel.epgCandidates.any { it in populated } ||
                     (newMatch != null && newMatch in populated)
@@ -704,6 +872,7 @@ class EpgRepository(
 
         const val BATCH_SIZE = 500
         const val DELETE_BATCH_SIZE = 1_000
+        const val MAINTENANCE_MAX_BATCHES = 8
         const val MAX_PROGRAMMES_PER_FEED = 150_000
         const val MAX_PROGRAMMES_TOTAL = 200_000
         const val MAX_ALIASES_PER_FEED = 20_000
@@ -715,7 +884,7 @@ class EpgRepository(
         const val MAX_URL_CHARS = 2_048
 
         val RETENTION_PAST_MILLIS: Long = TimeUnit.DAYS.toMillis(1)
-        val RETENTION_FUTURE_MILLIS: Long = TimeUnit.DAYS.toMillis(8)
+        val RETENTION_FUTURE_MILLIS: Long = TimeUnit.DAYS.toMillis(2)
         val REFRESH_INTERVAL_MILLIS: Long = TimeUnit.HOURS.toMillis(6)
         val MIN_CACHED_FUTURE_MILLIS: Long = TimeUnit.HOURS.toMillis(6)
         val LOW_COVERAGE_RETRY_MILLIS: Long = TimeUnit.HOURS.toMillis(1)

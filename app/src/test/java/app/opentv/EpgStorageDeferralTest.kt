@@ -136,4 +136,30 @@ class EpgStorageDeferralTest {
             assertCached()
         }
     }
+
+    @Test fun `feed cooldown does not turn a known failed guide healthy`() = runBlocking {
+        // The fixture's persisted provider failure is inside its retry cooldown. The bounded
+        // short-guide endpoint can still provide a current listing, but no bulk XMLTV retry ran.
+        val summary = repository.syncAll(now)
+        assertEquals(0, summary.feedsFailed)
+        assertTrue(repository.health.value.failed)
+        assertFalse(repository.health.value.refreshing)
+        assertEquals(requests, shortRequests)
+        assertEquals(1, db.epgFeeds().forProvider(1)!!.failureCount)
+    }
+
+    @Test fun `cancelled refresh retains the previous failed notice and clears loading`() = runBlocking {
+        repository.syncAll(now)
+        assertTrue(repository.health.value.failed)
+        cancelDuringShortRequest = true
+        try {
+            repository.syncAll(now + 1, force = true)
+            fail("Cancellation swallowed")
+        } catch (_: CancellationException) {
+            assertTrue(repository.health.value.failed)
+            assertFalse(repository.health.value.refreshing)
+            assertFalse(repository.health.value.storageBlocked)
+            assertEquals("New schedule", db.programmes().upcoming(syntheticId, now, 100).single().title)
+        }
+    }
 }
