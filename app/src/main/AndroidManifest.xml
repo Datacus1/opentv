@@ -78,6 +78,7 @@
             <intent-filter>
                 <action android:name="app.opentv.GUIDE_AUDIT" />
                 <action android:name="app.opentv.STORAGE_AUDIT" />
+                <action android:name="app.opentv.GUIDE_IDENTITY_AUDIT" />
             </intent-filter>
         </receiver>
 

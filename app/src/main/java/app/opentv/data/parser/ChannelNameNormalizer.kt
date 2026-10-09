@@ -56,7 +56,7 @@ object ChannelNameNormalizer {
     private val EXTRA_TOKENS = setOf(
         "RAW", "HEVC", "H265", "H.265", "H264", "H.264", "AV1",
         "50FPS", "60FPS", "25FPS", "30FPS", "FPS",
-        "HDR", "DOLBY", "VISION", "PLUS",
+        "HDR", "DOLBY", "VISION",
     )
 
     /**

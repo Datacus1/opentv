@@ -18,10 +18,8 @@ import app.opentv.data.parser.ChannelNameNormalizer
  *
  * A missing guide entry reads as "provider doesn't do EPG" and can be fixed with a manual
  * override. A *wrong* one shows EastEnders against a sports channel, and the user reasonably
- * concludes the whole guide is broken. So the fuzzy tier only accepts a prefix match when it
- * is **unambiguous** — exactly one guide channel fits. `bbcone` will claim `BBC One` when
- * that is the only candidate, but if the guide carries `BBC One London` *and* `BBC One
- * Wales` and nothing plain, we refuse to guess between regions.
+ * concludes the whole guide is broken. Only literal ids, unique terminal feed revisions,
+ * exact names and reviewed semantic aliases qualify. Unique prefixes are not identity.
  */
 object EpgMatcher {
 
@@ -34,10 +32,10 @@ object EpgMatcher {
 
     class Index internal constructor(
         private val exact: Map<String, String>,
-        private val sortedKeys: List<String>,
+        private val literalIds: Map<String, String>,
+        private val canonicalIds: Map<String, String>,
         /** Null is an ambiguous key, distinct from a key absent from the map. */
         private val keyIds: Map<String, String?>,
-        private val keyLengths: List<Int>,
     ) {
         /**
          * Matches a provider channel using its explicit XMLTV id before falling back to its
@@ -48,10 +46,7 @@ object EpgMatcher {
         fun matchProvider(groupKey: String, providerEpgId: String?): String? {
             providerEpgId
                 ?.takeIf { it.isNotBlank() }
-                ?.let { id ->
-                    matchExact(ChannelNameNormalizer.normalize(id).groupKey)
-                        ?: matchExact(canonicalGuideIdKey(id))
-                }
+                ?.let(::matchId)
                 ?.let { return it }
 
             // A small set of direction-preserving names for national feeds whose public XMLTV
@@ -74,6 +69,9 @@ object EpgMatcher {
             return match(groupKey)
         }
 
+        fun matchId(id: String): String? = literalIds[id.trim()]
+            ?: canonicalIds[canonicalGuideIdKey(id)]
+
         /** Exact-only lookup for authoritative ids and direction-sensitive aliases. */
         private fun matchExact(groupKey: String): String? = exact[groupKey]
 
@@ -83,44 +81,13 @@ object EpgMatcher {
 
             exact[groupKey]?.let { return it }
 
-            return prefixResult(groupKey).first
+            // Uniqueness is not identity: ESPN11 is not ESPN1; HGTV West is not HGTV;
+            // US Asian streams are not USA Network. Only exact or reviewed aliases qualify.
+            return null
         }
 
-        /** Shares the indexed prefix tier with diagnostics instead of scanning every alias again. */
-        fun hasAmbiguousPrefix(groupKey: String): Boolean = prefixResult(groupKey).second
-
-        private fun prefixResult(groupKey: String): Pair<String?, Boolean> {
-            if (groupKey.length < MIN_KEY_LENGTH) return null to false
-            var found: String? = null
-            val semanticPlus = groupKey.contains("plus")
-            fun merge(key: String): Boolean {
-                if (key.contains("plus") != semanticPlus) return true
-                val id = keyIds[key] ?: return false
-                if (found != null && found != id) return false
-                found = id
-                return true
-            }
-            // Longer aliases beginning with the provider key occupy one contiguous sorted range.
-            // Binary search jumps over unrelated aliases; an unknown station does not scan an
-            // entire public guide for every quality variant of every provider channel.
-            var low = 0
-            var high = sortedKeys.size
-            while (low < high) {
-                val middle = (low + high) ushr 1
-                if (sortedKeys[middle] < groupKey) low = middle + 1 else high = middle
-            }
-            var position = low
-            while (position < sortedKeys.size && sortedKeys[position].startsWith(groupKey)) {
-                if (!merge(sortedKeys[position++])) return null to true
-            }
-            // The opposite direction needs only hash lookups at lengths that exist in the index.
-            for (length in keyLengths) {
-                if (length >= groupKey.length) break // same-length keys were visited above
-                val prefix = groupKey.substring(0, length)
-                if (keyIds.containsKey(prefix) && !merge(prefix)) return null to true
-            }
-            return found to false
-        }
+        /** Retained diagnostic API name; only exact identity collisions are now ambiguous. */
+        fun hasAmbiguousPrefix(groupKey: String): Boolean = keyIds.containsKey(groupKey) && keyIds[groupKey] == null
     }
 
     /**
@@ -134,10 +101,14 @@ object EpgMatcher {
         val exact = HashMap<String, String>()
         val ambiguous = HashSet<String>()
         val all = ArrayList<Alias>()
+        val literalIds = HashMap<String, String>()
+        val canonicalCandidates = HashMap<String, MutableSet<String>>()
 
         var visited = 0
         for ((epgId, name) in aliases) {
             if (visited++ % 64 == 0) checkCancellation()
+            literalIds[epgId.trim()] = epgId
+            canonicalCandidates.getOrPut(canonicalGuideIdKey(epgId)) { HashSet() }.add(epgId)
             val candidates = listOf(
                 ChannelNameNormalizer.normalize(name).groupKey,
                 ChannelNameNormalizer.normalize(epgId).groupKey,
@@ -161,7 +132,9 @@ object EpgMatcher {
         checkCancellation()
         val keys = all.map { it.key }.distinct().sorted()
         val keyIds = keys.associateWith { key -> if (key in ambiguous) null else exact[key] }
-        return Index(exact, keys, keyIds, keys.map { it.length }.distinct().sorted())
+        return Index(exact, literalIds, canonicalCandidates.mapNotNull { (key, ids) ->
+            ids.singleOrNull()?.let { key to it }
+        }.toMap(), keyIds)
     }
 
     /**
@@ -186,6 +159,10 @@ object EpgMatcher {
 
     private val SAFE_PLATFORM_PREFIXES = listOf("samsung")
 
+    /** Reviewed name equivalence only; never a generic prefix/word deletion. */
+    internal fun reviewedIdentityKey(key: String): String = PROVIDER_KEY_ALIASES[key]?.singleOrNull()
+        ?.let { ChannelNameNormalizer.normalize(it).groupKey } ?: key
+
     /**
      * Provider labels observed in the field whose public-guide names are semantically equivalent
      * but cannot be reached by punctuation/quality normalisation. Values are the guide's literal
@@ -194,6 +171,22 @@ object EpgMatcher {
      */
     private val PROVIDER_KEY_ALIASES: Map<String, List<String>> = mapOf(
         "ae" to listOf("A and E HD East"),
+        "americanheroes" to listOf("American Heroes Channel HD"),
+        "beteast" to listOf("BET HD"),
+        "cartoonnetworkeast" to listOf("Cartoon Network HD"),
+        "cheddarbusiness" to listOf("Cheddar"),
+        "foodnetworkeast" to listOf("Food Network HD"),
+        "foxnews" to listOf("Fox News Channel HD"),
+        "freeformeast" to listOf("Freeform HD"),
+        "fxeast" to listOf("FX HD"),
+        "fxm" to listOf("FX Movie Channel HD"),
+        "lifetimemovienetworklmn" to listOf("LMN HD"),
+        "msnbcmsnow" to listOf("MS NOW HD"),
+        "nbceast" to listOf("NBC East Stream"),
+        "nbcwest" to listOf("NBC West Stream"),
+        "shoxbeteast" to listOf("SHO x BET HD"),
+        "thegrioblacknewschannel" to listOf("The Grio HD"),
+        "vh1east" to listOf("VH1 HD"),
         "abceast" to listOf("ABC National Feed"),
         "abcwest" to listOf("ABC National Feed Pacific"),
         "amceast" to listOf("AMC HD"),

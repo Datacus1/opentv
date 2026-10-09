@@ -71,7 +71,7 @@ class EpgGuideRecoveryIntegrationTest {
         db.epgAliases().upsertAll(listOf(EpgChannelAlias(1, "known", "known", "known")))
         db.programmes().upsertAll(listOf(p("known", now, title = "Cached")))
         db.channels().upsertAll(listOf(Channel(id = 1, sourceId = 7, streamId = "1", name = "known", groupKey = "known",
-            categoryId = null, logoUrl = null, epgChannelId = "known", number = null, streamUrl = "https://example.invalid/live")))
+            categoryId = null, logoUrl = null, epgChannelId = "known", matchedEpgId = "known", number = null, streamUrl = "https://example.invalid/live")))
     }
     @After fun close() = db.close()
 

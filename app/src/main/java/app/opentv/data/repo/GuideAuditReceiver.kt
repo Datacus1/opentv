@@ -21,7 +21,7 @@ import kotlinx.serialization.json.Json
 /** Read-only, ADB/system DUMP-protected diagnostics; not an HTTP or public-app API. */
 class GuideAuditReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != ACTION && intent.action != STORAGE_ACTION) return
+        if (intent.action != ACTION && intent.action != STORAGE_ACTION && intent.action != IDENTITY_ACTION) return
         val pending = goAsync()
         scope.launch {
             try {
@@ -31,6 +31,18 @@ class GuideAuditReceiver : BroadcastReceiver() {
                             ServiceLocator.get(context).database, System.currentTimeMillis()))
                     }
                     val requested = intent.getStringExtra("snapshot")
+                    if (intent.action == IDENTITY_ACTION) {
+                        if (requested == null) {
+                            identities = ServiceLocator.get(context).epgRepository.auditIdentities(System.currentTimeMillis())
+                            identityToken = UUID.randomUUID().toString()
+                            identityCreated = SystemClock.elapsedRealtime()
+                        } else if (requested != identityToken || SystemClock.elapsedRealtime() - identityCreated > 120_000) {
+                            return@withLock "{\"error\":\"Snapshot expired; start again\"}"
+                        }
+                        return@withLock Json.encodeToString(IdentityReply(identityToken,
+                            identities!!.page(intent.getStringExtra("kind") ?: "channels",
+                                intent.getIntExtra("offset", 0), intent.getIntExtra("limit", 100))))
+                    }
                     if (requested == null) {
                         rows = ServiceLocator.get(context).epgRepository.auditChannels(System.currentTimeMillis())
                         token = UUID.randomUUID().toString()
@@ -55,13 +67,18 @@ class GuideAuditReceiver : BroadcastReceiver() {
     }
 
     @Serializable private data class Reply(val snapshot: String, val page: GuideCoveragePage)
+    @Serializable private data class IdentityReply(val snapshot: String, val page: GuideIdentityPage)
     companion object {
         const val ACTION = "app.opentv.GUIDE_AUDIT"
         const val STORAGE_ACTION = "app.opentv.STORAGE_AUDIT"
+        const val IDENTITY_ACTION = "app.opentv.GUIDE_IDENTITY_AUDIT"
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         private val mutex = Mutex()
         private var token = ""
         private var created = 0L
         private var rows: List<GuideChannelAudit> = emptyList()
+        private var identities: GuideIdentitySnapshot? = null
+        private var identityToken = ""
+        private var identityCreated = 0L
     }
 }

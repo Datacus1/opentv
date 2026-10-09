@@ -190,6 +190,16 @@ class EpgRepository(
         result
     }
 
+    suspend fun auditIdentities(now: Long): GuideIdentitySnapshot = withContext(Dispatchers.IO) {
+        val snapshot = database.withTransaction {
+            AuditSnapshot(channelDao.allForMatching(), feedDao.all(),
+                aliasDao.allForAudit(), programmeDao.guideCoverage(now))
+        }
+        val context = currentCoroutineContext()
+        GuideIdentityAudit.snapshot(snapshot.channels, snapshot.feeds, snapshot.aliases,
+            snapshot.coverage) { context.ensureActive() }
+    }
+
     private data class AuditSnapshot(
         val channels: List<Channel>, val feeds: List<EpgFeed>,
         val aliases: List<EpgChannelAlias>, val coverage: List<GuideCoverageRow>,
@@ -916,15 +926,15 @@ class EpgRepository(
         // Empty aliases must not make a populated alias look ambiguous. The UI can only use a
         // match backed by programmes, so build the automatic index from that same usable set.
         val populatedAliases = aliases.filter { it.epgId in populated }
-        val index = EpgMatcher.buildIndex(populatedAliases.map { it.epgId to it.displayName })
         val channels = channelDao.allForMatching()
+        val context = currentCoroutineContext()
+        val resolver = GuideIdentityResolver(channels, feedDao.all(), populatedAliases, populated) { context.ensureActive() }
         var matched = 0
 
         for (channel in channels) {
             // Recompute from the preserved provider name so matcher improvements take effect on
             // an in-place upgrade even before the next catalogue refresh rewrites stored keys.
-            val currentGroupKey = ChannelNameNormalizer.normalize(channel.name).groupKey
-            val newMatch = index.matchProvider(currentGroupKey, channel.epgChannelId)
+            val newMatch = resolver.resolve(channel).id
             if (newMatch != channel.matchedEpgId) {
                 ensureHardWriteReserve()
                 channelDao.setMatchedEpgId(channel.id, newMatch)

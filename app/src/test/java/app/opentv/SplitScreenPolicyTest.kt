@@ -38,7 +38,7 @@ class SplitScreenPolicyTest {
         val high = channel(1, "ABC FHD", "abc", 300).copy(
             epgOverrideId = "empty-override", epgChannelId = "empty-provider", matchedEpgId = "empty-match",
         )
-        val low = channel(2, "ABC HD", "abc", 200).copy(epgChannelId = "abc")
+        val low = channel(2, "ABC HD", "abc", 200).copy(epgChannelId = "abc", matchedEpgId = "abc")
         val other = channel(3, "FOX HD", "fox", 200).copy(epgOverrideId = "override", epgChannelId = "provider")
         val current = Programme(1, "abc", 100, 200, "Game")
         val preferred = Programme(1, "override", 100, 200, "Override show")
@@ -51,9 +51,9 @@ class SplitScreenPolicyTest {
 
     @Test
     fun `split guide removes ended programmes advances at boundary and isolates providers`() {
-        val first = channel(1, "FOX HD", "fox", 200).copy(epgChannelId = "fox-one")
-        val second = first.copy(id = 2, sourceId = 2, epgChannelId = "fox-two")
-        val hidden = channel(3, "Hidden", "hidden", 100).copy(hidden = true, epgChannelId = "hidden")
+        val first = channel(1, "FOX HD", "fox", 200).copy(epgChannelId = "fox-one", matchedEpgId = "fox-one")
+        val second = first.copy(id = 2, sourceId = 2, epgChannelId = "fox-two", matchedEpgId = "fox-two")
+        val hidden = channel(3, "Hidden", "hidden", 100).copy(hidden = true, epgChannelId = "hidden", matchedEpgId = "hidden")
         val ended = Programme(1, "fox-one", 100, 200, "Old")
         val next = Programme(1, "fox-one", 200, 300, "New")
         val other = Programme(1, "fox-two", 100, 300, "Other provider")

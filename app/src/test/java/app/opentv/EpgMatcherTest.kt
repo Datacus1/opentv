@@ -222,11 +222,11 @@ class EpgMatcherTest {
     }
 
     @Test
-    fun `unique prefix matches are accepted`() {
+    fun `unique regional prefix is not proof of identity`() {
         val idx = index("bbc1london.uk" to "BBC One London")
 
         // Provider says just "BBC One"; the only candidate is the London region — take it.
-        assertThat(idx.match(keyOf("UK| BBC ONE"))).isEqualTo("bbc1london.uk")
+        assertThat(idx.match(keyOf("UK| BBC ONE"))).isNull()
     }
 
     @Test

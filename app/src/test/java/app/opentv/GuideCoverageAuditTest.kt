@@ -27,7 +27,7 @@ class GuideCoverageAuditTest {
     private fun channel(id: Long = 1, name: String = "ABC East", epgId: String? = "abc") = Channel(
         id = id, sourceId = 7, streamId = "private-stream-id", name = name,
         displayName = name, groupKey = "abceast", categoryId = "live", logoUrl = "https://private/logo",
-        epgChannelId = epgId, streamUrl = "https://private/user/password/channel", number = null,
+        epgChannelId = epgId, matchedEpgId = epgId, streamUrl = "https://private/user/password/channel", number = null,
     )
 
     private fun coverage(
@@ -75,12 +75,12 @@ class GuideCoverageAuditTest {
         val row = GuideCoverageAudit.audit(listOf(channel(name = "BBC One", epgId = null)),
             listOf(enabled), listOf(alias("london", "BBC One London"), alias("wales", "BBC One Wales")),
             listOf(coverage("london"), coverage("wales")), false).single()
-        assertEquals(GuideCoverageStatus.AMBIGUOUS, row.status)
+        assertEquals(GuideCoverageStatus.UNRESOLVED, row.status)
         val empty = GuideCoverageAudit.audit(listOf(channel(name = "BBC One", epgId = null)),
             listOf(enabled), listOf(alias("london", "BBC One London"), alias("wales", "BBC One Wales")),
             listOf(coverage("london")), false).single()
-        assertEquals(GuideCoverageStatus.CANDIDATE_MATCH_NOT_APPLIED, empty.status)
-        assertEquals("london", empty.suggestedGuideId)
+        assertEquals(GuideCoverageStatus.UNRESOLVED, empty.status)
+        assertNull(empty.suggestedGuideId)
     }
 
     @Test
@@ -155,7 +155,7 @@ class GuideCoverageAuditTest {
     @Test
     fun `all identical quality variants can supply guide and lower quality current wins`() {
         val high = channel(1, epgId = "empty").copy(qualityRank = 300)
-        val duplicate = high.copy(id = 2, epgChannelId = "live")
+        val duplicate = high.copy(id = 2, epgChannelId = "live", matchedEpgId = "live")
         val live = Programme(1, "live", 50, 150, "Live")
         assertEquals("live", chooseGuideCandidate(listOf(high, duplicate), mapOf("live" to listOf(live)), 100))
         val lower = duplicate.copy(id = 3, qualityRank = 200)

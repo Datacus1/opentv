@@ -53,6 +53,9 @@ data class GuideChannelAudit(
     /** A sibling stream may populate the guide row even if this individual variant has no id. */
     val logicalCurrentAvailable: Boolean = false,
     val logicalGuideId: String? = null,
+    val identityReason: String = "NOT_AUDITED",
+    val storedMatchDisagrees: Boolean = false,
+    val rejectedProviderId: Boolean = false,
 )
 
 @Serializable
@@ -82,7 +85,7 @@ object GuideCoverageAudit {
         val disabledCoverage = coverage.filter { it.feedId in disabledIds }.groupBy { it.epgChannelId }
         val populated = enabledCoverage.filterValues { rows -> rows.any { it.totalRows > 0 } }.keys
         val usableAliases = aliases.filter { it.feedId in enabledIds && it.epgId in populated }
-        val index = EpgMatcher.buildIndex(usableAliases.map { it.epgId to it.displayName }, checkCancellation)
+        val resolver = GuideIdentityResolver(channels, feeds, usableAliases, populated, checkCancellation)
         val disabledIndex = EpgMatcher.buildIndex(
             aliases.filter { it.feedId in disabledIds }.map { it.epgId to it.displayName },
             checkCancellation,
@@ -90,7 +93,6 @@ object GuideCoverageAudit {
         // Quality variants frequently repeat a provider id or normalized station name. Null
         // matches need an explicit wrapper: Map.getOrPut with null would recompute each miss.
         data class MatchResult(val id: String?, val ambiguous: Boolean)
-        val enabledMatches = HashMap<Pair<String, String?>, MatchResult>()
         val disabledMatches = HashMap<Pair<String, String?>, MatchResult>()
         fun match(index: EpgMatcher.Index, cache: MutableMap<Pair<String, String?>, MatchResult>,
             key: String, providerId: String?): MatchResult = cache.getOrPut(key to providerId) {
@@ -127,7 +129,8 @@ object GuideCoverageAudit {
             }
             val chosen = override ?: candidates.firstOrNull(::hasCurrent)
                 ?: candidates.firstOrNull(::hasUpcoming) ?: candidates.firstOrNull(::hasRows)
-            val suggestedMatch = match(index, enabledMatches, key, channel.epgChannelId)
+            val decision = resolver.resolve(channel)
+            val suggestedMatch = MatchResult(decision.id, decision.reason == "AMBIGUOUS_IDENTITY")
             val suggested = suggestedMatch.id
             val unappliedUsefulMatch = override == null && suggested != null && suggested !in candidates &&
                 (hasCurrent(suggested) || hasUpcoming(suggested))
@@ -154,6 +157,9 @@ object GuideCoverageAudit {
                 lastEndMillis = chosenRows.maxOfOrNull { it.lastEndMillis },
                 logicalCurrentAvailable = logicalGuideId != null && hasCurrent(logicalGuideId),
                 logicalGuideId = logicalGuideId?.let(::safeLabel),
+                identityReason = decision.reason,
+                storedMatchDisagrees = channel.matchedEpgId != null && channel.matchedEpgId != decision.id,
+                rejectedProviderId = decision.rejectedProviderId,
             )
         }
     }
@@ -169,7 +175,7 @@ object GuideCoverageAudit {
         )
     }
 
-    private fun safeLabel(value: String): String = value
+    internal fun safeLabel(value: String): String = value
         .replace(URI, "[redacted link]")
         .filterNot { it.isISOControl() }.take(160)
 

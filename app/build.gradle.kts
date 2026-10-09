@@ -14,8 +14,8 @@ android {
         applicationId = "app.opentv"
         minSdk = 23
         targetSdk = 35
-        versionCode = 61
-        versionName = "0.11.7-commercial-break.42-guide-catch-up"
+        versionCode = 63
+        versionName = "0.11.7-commercial-break.44-guide-identity-fix"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

@@ -164,12 +164,11 @@ data class Channel(
     val lastSeenMillis: Long = 0,
 ) {
     /**
-     * The guide ids worth trying for this channel, most trustworthy first. The UI walks
-     * them in order and uses the first that actually has programmes — a provider-supplied
-     * id pointing at a guide the provider never ships must not shadow a working match.
+     * Manual override followed by the validated matcher result. The preserved raw provider id
+     * is input evidence, not a UI shortcut: reused/conflicting ids must not bypass validation.
      */
     val epgCandidates: List<String>
-        get() = listOfNotNull(epgOverrideId, epgChannelId, matchedEpgId)
+        get() = listOfNotNull(epgOverrideId, matchedEpgId)
 }
 
 /** What the UI should show for a channel: the user's rename if set, else the cleaned display name. */
