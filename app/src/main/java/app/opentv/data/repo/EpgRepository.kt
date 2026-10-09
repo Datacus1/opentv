@@ -516,9 +516,9 @@ class EpgRepository(
             val candidates = channelDao.forSource(source.id)
                 .filter { it.groupKey in PROVIDER_SHORT_EPG_GROUP_KEYS }
                 .sortedByDescending { it.qualityRank }
-            for ((groupKey, variants) in candidates.groupBy { it.groupKey }) {
+            for ((identityKey, variants) in candidates.groupBy(ChannelGrouping::shortGuideKey)) {
                 if (availableBytes() < SOFT_FREE_RESERVE_BYTES) return ShortGuideSummary(written, true)
-                val syntheticId = providerShortEpgId(source.id, groupKey)
+                val syntheticId = providerShortEpgId(source.id, variants.first().groupKey, identityKey)
                 val cachedThrough = programmeDao.upcoming(
                     syntheticId,
                     nowUtcMillis,
@@ -587,8 +587,8 @@ class EpgRepository(
                             listOf(EpgChannelAlias(
                                 feedId = feed.id,
                                 epgId = syntheticId,
-                                displayName = variants.first().displayName,
-                                normalizedKey = groupKey,
+                                displayName = variants.first().name,
+                                normalizedKey = GuideIdentityResolver.identity(variants.first().name).first,
                             )),
                         )
                     }
@@ -1050,8 +1050,13 @@ class EpgRepository(
         const val PROVIDER_SHORT_EPG_LIMIT = 100
         internal val PROVIDER_SHORT_EPG_GROUP_KEYS: Set<String> = setOf("foxeast")
 
-        internal fun providerShortEpgId(sourceId: Long, groupKey: String): String =
-            "opentv.provider-short.$sourceId.$groupKey"
+        internal fun providerShortEpgId(sourceId: Long, groupKey: String, identityKey: String? = null): String {
+            val suffix = identityKey?.let { key ->
+                java.security.MessageDigest.getInstance("SHA-256").digest(key.toByteArray(Charsets.UTF_8))
+                    .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+            }
+            return "opentv.provider-short.$sourceId.$groupKey" + (suffix?.let { ".$it" } ?: "")
+        }
 
         const val USA_FEED_NAME = "USA — epgshare01"
         const val USA_SPORTS_FEED_NAME = "USA team sports — epgshare01"

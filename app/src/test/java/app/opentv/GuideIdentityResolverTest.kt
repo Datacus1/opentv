@@ -17,6 +17,25 @@ class GuideIdentityResolverTest {
     private fun resolve(channels: List<Channel>, aliases: List<EpgChannelAlias>) =
         GuideIdentityResolver(channels, feeds, aliases, aliases.map { it.epgId }.toSet())
 
+    @Test fun `scoped short guide never becomes an ordinary name fallback for a sibling`() {
+        val a = channel(1, "US: FOX East")
+        val b = a.copy(id = 2)
+        val scoped = EpgRepository.providerShortEpgId(1, "foxeast", ChannelGrouping.shortGuideKey(a))
+        val resolver = resolve(listOf(a, b), listOf(alias(scoped, a.name),
+            alias("opentv.provider-short.1.foxeast", "FOX East")))
+        assertEquals(scoped, resolver.resolve(a).id)
+        assertNull(resolver.resolve(b).id)
+    }
+
+    @Test fun `short guide decision cache includes every request identity field`() {
+        val a = channel(1, "US: FOX East", "pending")
+        val b = a.copy(id = 2, qualityRank = 400)
+        val scoped = EpgRepository.providerShortEpgId(1, "foxeast", ChannelGrouping.shortGuideKey(a))
+        val resolver = resolve(listOf(a, b), listOf(alias(scoped, a.name)))
+        assertEquals(scoped, resolver.resolve(a).id)
+        assertNull(resolver.resolve(b).id)
+    }
+
     @Test fun `shared corrupted id is quarantined even for its last alias victim and never bypasses candidates`() {
         val channels = listOf(channel(1, "US: DUST", "COVID19"),
             channel(2, "GA | Atlanta | CW WPCH", "COVID19"))

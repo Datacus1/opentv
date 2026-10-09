@@ -7,7 +7,8 @@ package app.opentv.ui.player
 
 import app.opentv.data.model.Channel
 import app.opentv.data.model.Programme
-import app.opentv.data.parser.ChannelNameNormalizer
+import app.opentv.data.repo.ChannelGrouping
+import app.opentv.data.repo.chooseGuideCandidate
 
 internal object SplitScreenPolicy {
     const val CONTROLS_TIMEOUT_MS = 5_000L
@@ -22,17 +23,17 @@ internal object SplitScreenPolicy {
     fun resizeMode(fillPictures: Boolean, expanded: Boolean): Int =
         if (fillPictures && !expanded) 4 else 0
 
-    /** Match the main guide's override/provider/matched-id and sibling-variant fallback. */
+    /** Match the main guide's approved identity boundary and authoritative manual override. */
     fun currentProgrammes(
         channels: List<Channel>, programmes: List<Programme>, nowMillis: Long,
     ): Map<Pair<Long, String>, Programme> {
-        val byEpgId = programmes.filter { it.isLiveAt(nowMillis) }
+        val byEpgId = programmes
             .sortedWith(compareByDescending<Programme> { it.startUtcMillis }.thenBy { it.feedId })
             .groupBy { it.epgChannelId }
         return channels.filter { !it.hidden }.groupBy(::logicalKey).mapNotNull { (key, variants) ->
-            variants.sortedByDescending { it.qualityRank }.asSequence()
-                .flatMap { it.epgCandidates.asSequence() }
-                .firstNotNullOfOrNull { byEpgId[it]?.firstOrNull() }
+            chooseGuideCandidate(variants, byEpgId, nowMillis)?.let { id ->
+                byEpgId[id]?.firstOrNull { it.isLiveAt(nowMillis) }
+            }
                 ?.let { key to it }
         }.toMap()
     }
@@ -54,16 +55,15 @@ internal object SplitScreenPolicy {
     }
 
     fun logicalKey(channel: Channel): Pair<Long, String> =
-        channel.sourceId to channel.groupKey.ifBlank {
-            ChannelNameNormalizer.normalize(channel.name).groupKey.ifBlank { "id:${channel.id}" }
-        }
+        channel.sourceId to ChannelGrouping.key(channel)
 
     /** Avoid opening two connections for quality variants of the same channel. */
     fun choices(channels: List<Channel>, primary: Channel?): List<Channel> {
         val primaryKey = primary?.let(::logicalKey)
         return channels.asSequence()
-            .filter { !it.hidden && logicalKey(it) != primaryKey }
+            .filter { !it.hidden }
             .groupBy(::logicalKey)
+            .filterKeys { it != primaryKey }
             .values
             .map { variants ->
                 // Prefer a <=1080p variant for the extra pane; do not change full-screen tuning.

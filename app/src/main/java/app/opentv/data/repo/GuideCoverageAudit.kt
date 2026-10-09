@@ -19,8 +19,9 @@ fun chooseGuideCandidate(
     byEpgChannel: Map<String, List<Programme>>,
     nowUtcMillis: Long,
 ): String? {
-    // ALL variants participate: identical-quality duplicate streams can have different guide ids.
-    val ordered = variants.sortedByDescending { it.qualityRank }
+    // Fail closed if a caller supplies mixed identities; all genuine duplicates still participate.
+    val primary = variants.maxByOrNull { it.qualityRank } ?: return null
+    val ordered = ChannelGrouping.variantsFor(primary, variants).sortedByDescending { it.qualityRank }
     ordered.asSequence().mapNotNull { it.epgOverrideId?.takeIf(String::isNotBlank) }
         .firstOrNull { !byEpgChannel[it].isNullOrEmpty() }?.let { return it }
     val candidates = ordered.flatMap { it.epgCandidates }.filter(String::isNotBlank).distinct()
@@ -69,7 +70,7 @@ data class GuideCoveragePage(
 )
 
 object GuideCoverageAudit {
-    /** Read-only, exhaustive raw-variant audit; callers may summarize (sourceId, groupKey) separately. */
+    /** Read-only exhaustive audit; logical availability uses the same safe grouping as the UI. */
     fun audit(
         channels: List<Channel>,
         feeds: List<EpgFeed>,
@@ -103,10 +104,8 @@ object GuideCoverageAudit {
         fun normalized(name: String) = normalizedNames.getOrPut(name) {
             ChannelNameNormalizer.normalize(name).groupKey
         }
-        fun logicalKey(channel: Channel) = channel.sourceId to channel.groupKey.ifBlank {
-            normalized(channel.name).ifBlank { "id:${channel.id}" }
-        }
-        val logicalCandidates = channels.filterNot { it.hidden }.groupBy(::logicalKey).mapValues { (_, variants) ->
+        val logicalKeys = channels.associate { it.id to ChannelGrouping.key(it, resolver.nameIdentity(it)) }
+        val logicalCandidates = channels.filterNot { it.hidden }.groupBy { logicalKeys.getValue(it.id) }.mapValues { (_, variants) ->
             val ordered = variants.sortedByDescending { it.qualityRank }
             val explicit = ordered.mapNotNull { it.epgOverrideId }.firstOrNull { id ->
                 enabledCoverage[id]?.any { it.visibleRows > 0 } == true
@@ -146,7 +145,7 @@ object GuideCoverageAudit {
                 else -> GuideCoverageStatus.UNRESOLVED
             }
             val chosenRows = chosen?.let(enabledCoverage::get).orEmpty()
-            val logicalGuideId = logicalCandidates[logicalKey(channel)]
+            val logicalGuideId = logicalCandidates[logicalKeys.getValue(channel.id)]
             GuideChannelAudit(
                 channelId = channel.id, sourceId = channel.sourceId,
                 name = safeLabel(channel.displayName), groupKey = safeLabel(channel.groupKey),

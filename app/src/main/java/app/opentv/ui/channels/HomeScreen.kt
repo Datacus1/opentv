@@ -271,7 +271,7 @@ fun HomeScreen(
                 rowChannelIds = rows.map { row ->
                     buildSet {
                         add(row.primary.id)
-                        row.variants.forEach { add(it.id) }
+                        row.allVariants.forEach { add(it.id) }
                     }
                 },
             )
@@ -418,7 +418,7 @@ fun HomeScreen(
         !showBackgroundPrompt
     fun returnToCurrentChannel() {
         val visibleChannel = rows.asSequence()
-            .flatMap { sequenceOf(it.primary) + it.variants.asSequence() }
+            .flatMap { it.allVariants.asSequence() }
             .firstOrNull { it.id == currentChannelId }
         if (visibleChannel != null) {
             requestLive(visibleChannel)

@@ -153,18 +153,19 @@ class GuideCoverageAuditTest {
     }
 
     @Test
-    fun `all identical quality variants can supply guide and lower quality current wins`() {
+    fun `different approved identities cannot supply a sibling guide even at identical quality`() {
         val high = channel(1, epgId = "empty").copy(qualityRank = 300)
         val duplicate = high.copy(id = 2, epgChannelId = "live", matchedEpgId = "live")
         val live = Programme(1, "live", 50, 150, "Live")
-        assertEquals("live", chooseGuideCandidate(listOf(high, duplicate), mapOf("live" to listOf(live)), 100))
+        assertNull(chooseGuideCandidate(listOf(high, duplicate), mapOf("live" to listOf(live)), 100))
         val lower = duplicate.copy(id = 3, qualityRank = 200)
-        assertEquals("live", chooseGuideCandidate(listOf(high, lower), mapOf("live" to listOf(live)), 100))
+        assertNull(chooseGuideCandidate(listOf(high, lower), mapOf("live" to listOf(live)), 100))
         val rows = GuideCoverageAudit.audit(listOf(high, duplicate), listOf(enabled), emptyList(),
             listOf(coverage("live")), false)
         assertEquals(GuideCoverageStatus.UNRESOLVED, rows.first().status)
-        assertTrue(rows.all { it.logicalCurrentAvailable })
-        assertTrue(rows.all { it.logicalGuideId == "live" })
+        assertFalse(rows.first().logicalCurrentAvailable)
+        assertNull(rows.first().logicalGuideId)
+        assertEquals("live", rows.last().logicalGuideId)
     }
 
     @Test

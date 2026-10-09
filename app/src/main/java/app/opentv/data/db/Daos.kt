@@ -164,15 +164,18 @@ interface ChannelDao {
     @Query("SELECT * FROM channels WHERE id = :id")
     suspend fun byId(id: Long): Channel?
 
-    /** Every quality variant of one logical channel, best first. */
+    /** Candidate superset only; ChannelGrouping supplies the identity boundary in consumers. */
     @Query(
         """
         SELECT * FROM channels
-        WHERE groupKey = :groupKey AND groupKey != '' AND hidden = 0
+        WHERE hidden = 0 AND ((groupKey = :groupKey AND groupKey != '')
+            OR (:matchedId != '' AND matchedEpgId = :matchedId)
+            OR (:overrideId != '' AND epgOverrideId = :overrideId)
+            OR (:providerId != '' AND epgChannelId = :providerId))
         ORDER BY qualityRank DESC, displayName
         """
     )
-    suspend fun variantsInGroup(groupKey: String): List<Channel>
+    suspend fun variantCandidates(groupKey: String, matchedId: String?, overrideId: String?, providerId: String?): List<Channel>
 
     @Query("SELECT COUNT(*) FROM channels WHERE sourceId = :sourceId")
     suspend fun countForSource(sourceId: Long): Int

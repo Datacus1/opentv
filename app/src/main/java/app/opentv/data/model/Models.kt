@@ -116,9 +116,8 @@ data class Channel(
     /** Cleaned display name: `BBC One`. What the UI shows. */
     val displayName: String = name,
     /**
-     * Normalised join key: `bbcone`. Channels sharing a groupKey are quality variants of
-     * one logical channel — shown as a single row, switchable during playback — and this is
-     * also the key the EPG matcher joins on. See ChannelNameNormalizer.
+     * Normalised candidate/search key: `bbcone`. Not sufficient to establish variants:
+     * ChannelGrouping also checks source, region and accepted schedule identity at runtime.
      */
     val groupKey: String = "",
     /** Higher plays by default. 0 = the name said nothing about quality. */

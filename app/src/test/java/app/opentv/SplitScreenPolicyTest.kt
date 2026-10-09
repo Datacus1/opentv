@@ -8,6 +8,7 @@ import app.opentv.ui.player.SplitScreenPolicy
 import app.opentv.player.LiveOffsetLearningPolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class SplitScreenPolicyTest {
@@ -34,7 +35,7 @@ class SplitScreenPolicyTest {
     }
 
     @Test
-    fun `split guide uses populated override provider matched and sibling variant ids`() {
+    fun `split guide uses approved candidates but never borrows a different sibling identity`() {
         val high = channel(1, "ABC FHD", "abc", 300).copy(
             epgOverrideId = "empty-override", epgChannelId = "empty-provider", matchedEpgId = "empty-match",
         )
@@ -45,7 +46,8 @@ class SplitScreenPolicyTest {
         val result = SplitScreenPolicy.currentProgrammes(listOf(high, low, other), listOf(
             current, preferred, Programme(1, "provider", 100, 200, "Provider show"),
         ), 150)
-        assertEquals(current, result[SplitScreenPolicy.logicalKey(high)])
+        assertNull(result[SplitScreenPolicy.logicalKey(high)])
+        assertEquals(current, result[SplitScreenPolicy.logicalKey(low)])
         assertEquals(preferred, result[SplitScreenPolicy.logicalKey(other)])
     }
 
@@ -209,6 +211,7 @@ class SplitScreenPolicyTest {
         categoryId = "sports",
         logoUrl = null,
         epgChannelId = null,
+        matchedEpgId = groupKey.takeIf(String::isNotBlank),
         number = null,
         streamUrl = "https://example.invalid/channel-$id",
     )

@@ -15,6 +15,7 @@ import app.opentv.data.model.SeriesRule
 import app.opentv.data.db.ChannelDao
 import app.opentv.data.model.Source
 import app.opentv.data.repo.EpgRepository
+import app.opentv.data.repo.ChannelGrouping
 import app.opentv.data.repo.RecordingRepository
 import app.opentv.data.repo.SourceRepository
 
@@ -245,9 +246,9 @@ class RecordingEngine(
         val busy = busyProviderIds(startMillis, endMillis)
         // Our provider is free this window, or nothing else is booked — no need to move.
         if (channel.sourceId !in busy) return channel
-        if (channel.groupKey.isEmpty()) return channel
-
-        val variants = channelDao.variantsInGroup(channel.groupKey)
+        val variants = channelDao.variantCandidates(channel.groupKey, channel.matchedEpgId,
+            channel.epgOverrideId, channel.epgChannelId)
+            .filter { ChannelGrouping.sameRecordingIdentity(channel, it) }
             .groupBy { it.sourceId }
             .mapNotNull { (_, chans) -> chans.maxByOrNull { it.qualityRank } }
 

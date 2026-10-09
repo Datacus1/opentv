@@ -26,8 +26,9 @@ A current programme is not evidence that it belongs to the selected channel.
 
 1. Literal or unique canonical provider ID in the channel's own provider feed.
 2. Literal or unique canonical provider ID in enabled public feeds.
-3. Exact normalized name or reviewed semantic alias in its own provider feed.
-4. Exact normalized name or reviewed semantic alias in enabled public feeds.
+3. Exact request-group-qualified short-guide ID in its own provider feed (whitelist only).
+4. Exact normalized name or reviewed semantic alias in its own provider feed.
+5. Exact normalized name or reviewed semantic alias in enabled public feeds.
 
 Other providers' aliases are not fallback candidates. Name fallback respects
 country hints, Caribbean/Latin-American groups, numbered feeds, `PLUS`, direction,
@@ -100,3 +101,68 @@ public-ID/name/alias acceptances. This is metadata-level review, not certificati
 of 6,581 broadcasts. Many unresolved IDs have no imported usable-window rows;
 that does not prove the upstream provider has no schedule. Leave them unresolved
 until trustworthy evidence is available instead of attaching a plausible schedule.
+
+## Safe logical-channel consumers (.46 offline candidate)
+
+The later offline audit found a second boundary: correct individual matches could
+still be merged by bare `groupKey` in the guide and split picker. US/Australian ESPN
+collapsed, and quarantined Caribbean Cartoon Network borrowed the US schedule.
+This was a consumer identity bug, not evidence of cache overwrite failure.
+
+`ChannelGrouping` is now the shared runtime policy for guide rows/keys, split choices
+and listings, quality variants, audit availability, and recording provider selection:
+
+- UI groups include source, reviewed semantic name, explicit region/tag, exact
+  accepted match and manual override. Country/feed-revision/case variants of IDs
+  are not newly equated here; only IDs already resolved to the same literal identity
+  can merge. Different IDs may be legitimate equivalents, but require additional
+  verified evidence before merging. This deliberately can show more rows.
+- Unmatched channels cannot share an approved schedule. Unknown/no-ID streams
+  remain individually reachable by stable channel ID; exact declared-ID twins can
+  group only within their own source/name/region/UHD boundary and have no listing
+  until an identity is accepted. Numbered, PLUS, direction and UHD event distinctions
+  remain conservative. User renames do not affect identity.
+- A mixed-list call to `chooseGuideCandidate` fails closed to the primary channel's
+  group. Populated manual overrides remain authoritative; an empty override may
+  fall back only to that same channel's approved match. Split listings follow this
+  policy rather than an independent candidate-walking implementation.
+- Candidate SQL fetches a superset by old name key or exact guide/provider ID;
+  shared in-memory filtering is mandatory. This includes reviewed aliases whose
+  old stored keys differ. Blank IDs do not broaden the query. Cross-provider
+  recording intentionally ignores source only when both full approved identities
+  agree; an unresolved or foreign-region alternate is never substituted.
+- Rows retain all genuine category/quality duplicates for Back focus and favourite/
+  hide updates, while quality menus still deduplicate identical quality signatures.
+  Lazy-list keys are saveable strings, computed once per row. Audit preparation
+  reuses operation-local normalized names; no mutable global cache is added.
+
+Short-guide requests use an independent source/name/region/declared-ID/UHD key,
+including stable channel ID when no declared ID exists. SHA-256-qualified synthetic
+IDs stay stable across matcher/override updates; aliases retain raw regional names.
+Legacy and new synthetic aliases are excluded from ordinary name fallback. Only
+the exact populated request-group identity from the same source can be accepted,
+preventing another opaque sibling's successful request from lighting up this one.
+The resolver decision cache includes the complete short key. Legacy rows remain
+readable through existing persisted matches until recomputation and age under the
+ordinary retention policy; no migration delete or unbounded cleanup is added.
+
+No schema, channel IDs, user-field migration, reserves, retention/caps, player,
+Netflix/boot or provider configuration change is needed. The installed .45 remains
+unchanged until a freshly authorized in-place update. .46 is based on .45/.42/.38,
+not the uninstalled .37 voice candidate.
+
+Offline validation: 556 tests passed across debug/release, 2 opt-in tests skipped;
+release-critical lint, R8 and packaging passed. An independent reviewer checked
+all 6,581 saved matcher decisions against the baseline (zero changes), all consumer
+results (6,445 groups; zero unresolved borrowers/stale disagreements), US/AU ESPN,
+Caribbean rejection, short-guide provenance and recording fallback. Real Room/fake
+HTTP tests cover legacy-cache coexistence, opaque siblings, region separation,
+candidate superset queries and actual simulated recording-clash scheduling.
+
+`ChannelGroupingTest` replays the same safe local fixture as the matcher. Optional
+`OPENTV_GUIDE_GROUPING_REPORT` writes only the metadata consumer result. Actual
+catalogue JSON remains outside Git. These are historical metadata/synthetic-marker
+checks, not live broadcasts, per-category completeness, physical navigation/audio,
+or Shield latency. The unchanged eight-second diagnostic deadline still needs a
+live check; PC timings are not Shield timings. Fresh readiness is required before
+installing, launching, input or otherwise interrupting the device.

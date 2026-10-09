@@ -17,6 +17,7 @@ class GuideIdentityResolver(
 ) {
     data class Decision(val id: String?, val reason: String, val rejectedProviderId: Boolean = false)
     private data class Scope(val source: Long, val publicOnly: Boolean, val region: String?, val include4k: Boolean)
+    private data class DecisionKey(val source: Long, val name: String, val providerId: String?, val shortKey: String?)
     private val providerFeedSources = feeds.filter { it.enabled && !it.deleting }
         .associate { it.id to it.providerSourceId }
     private val sharedIds = channels.filter { !it.epgChannelId.isNullOrBlank() }
@@ -28,15 +29,21 @@ class GuideIdentityResolver(
     private val usable = aliases.filter { it.feedId in providerFeedSources && it.epgId in populated &&
         it.epgId.trim() !in quarantinedIds }
     private val indexes = HashMap<Scope, EpgMatcher.Index>()
+    private val channelIdentities = HashMap<String, Pair<String, String?>>()
+    internal fun nameIdentity(channel: Channel): Pair<String, String?> =
+        channelIdentities.getOrPut(channel.name) { identity(channel.name) }
+    private val shortAliases = usable.filter { it.epgId.startsWith("opentv.provider-short.") }
+        .groupBy { it.epgId }
     private val aliasIdentities = usable.associateWith { identity(it.displayName) }
     private val aliasRegions = usable.associateWith { alias ->
         aliasIdentities.getValue(alias).second ?: countryFromId(alias.epgId)
     }
-    private val preparedAliases = usable.mapIndexed { i, alias ->
+    // Request-scoped schedules (including legacy unqualified ones) cannot prove a name match.
+    private val preparedAliases = usable.filterNot { it.epgId in shortAliases }.mapIndexed { i, alias ->
         if (i % 64 == 0) checkCancellation()
         alias to EpgMatcher.prepareAlias(alias.epgId, aliasIdentities.getValue(alias).first)
     }
-    private val decisions = HashMap<Triple<Long, String, String?>, Decision>()
+    private val decisions = HashMap<DecisionKey, Decision>()
 
     private fun index(scope: Scope) = indexes.getOrPut(scope) {
         checkCancellation()
@@ -50,8 +57,11 @@ class GuideIdentityResolver(
     }
 
     fun resolve(channel: Channel): Decision {
-        val (key, region) = identity(channel.name)
-        return decisions.getOrPut(Triple(channel.sourceId, channel.name, channel.epgChannelId)) {
+        val (key, region) = nameIdentity(channel)
+        val shortEligible = key in EpgRepository.PROVIDER_SHORT_EPG_GROUP_KEYS
+        val shortKey = if (shortEligible) ChannelGrouping.shortGuideKey(channel) else null
+        return decisions.getOrPut(DecisionKey(channel.sourceId, channel.name, channel.epgChannelId,
+            shortKey)) {
             val providerId = channel.epgChannelId?.takeIf(String::isNotBlank)
             val shared = (channel.sourceId to providerId?.trim()) in sharedIds
             val acceptedId = providerId.takeUnless { shared }
@@ -69,6 +79,14 @@ class GuideIdentityResolver(
             val include4k = FOUR_K.containsMatchIn(channel.name)
             val preferred = index(Scope(channel.sourceId, false, nameRegion, include4k))
             val fallback = index(Scope(channel.sourceId, true, nameRegion, include4k))
+            if (shortEligible) {
+                // Provenance is the exact short-guide request group, not its ambiguous label.
+                val shortId = EpgRepository.providerShortEpgId(channel.sourceId, key,
+                    shortKey!!)
+                if (shortAliases[shortId]?.any { providerFeedSources[it.feedId] == channel.sourceId } == true) {
+                    return@getOrPut Decision(shortId, "SOURCE_SHORT_GUIDE_IDENTITY", shared)
+                }
+            }
             preferred.matchProvider(key, null)?.let {
                 return@getOrPut Decision(it, "SOURCE_EXACT_IDENTITY", shared)
             }
@@ -109,7 +127,7 @@ class GuideIdentityResolver(
             val state = LOCAL_STATION.find(raw)?.groupValues?.get(1)
             return normal.groupKey to if (state in US_STATES) "US" else canonicalRegion(normal.region)
         }
-        private fun countryFromId(id: String) = canonicalRegion(COUNTRY_SUFFIX.find(id)?.groupValues?.get(1))
+        internal fun countryFromId(id: String) = canonicalRegion(COUNTRY_SUFFIX.find(id)?.groupValues?.get(1))
         private fun conflictKey(channel: Channel): String {
             val key = identity(channel.name).first
             val id = channel.epgChannelId!!.trim()

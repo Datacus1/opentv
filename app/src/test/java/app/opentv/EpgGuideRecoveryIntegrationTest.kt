@@ -8,6 +8,13 @@ import app.opentv.data.model.*
 import app.opentv.data.remote.XtreamApi
 import app.opentv.data.repo.EpgRepository
 import app.opentv.data.repo.GuideCoverageStatus
+import app.opentv.data.repo.ChannelGrouping
+import app.opentv.data.repo.CatalogRepository
+import app.opentv.data.remote.StalkerApi
+import app.opentv.core.AppSettings
+import app.opentv.data.repo.RecordingRepository
+import app.opentv.data.repo.SourceRepository
+import app.opentv.recording.RecordingEngine
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.Dispatchers
@@ -340,7 +347,7 @@ class EpgGuideRecoveryIntegrationTest {
         db.epgFeeds().update(db.epgFeeds().all().single().copy(url = null, providerSourceId = 7))
         db.channels().upsertAll((1..2).map { id -> Channel(id = id.toLong(), sourceId = 7,
             streamId = id.toString(), name = "FOX East", groupKey = "foxeast", qualityRank = 3 - id,
-            categoryId = null, logoUrl = null, epgChannelId = null, number = null,
+            categoryId = null, logoUrl = null, epgChannelId = "fox-east", number = null,
             streamUrl = "https://example.invalid/live") })
     }
     @Test fun `successful second short guide variant does not leave a false failure warning`() = runBlocking {
@@ -372,5 +379,82 @@ class EpgGuideRecoveryIntegrationTest {
         val result = r.syncAll(now, true)
         assertEquals(0, shortRequests); assertTrue(result.retryNeeded); assertTrue(r.health.value.failed)
         assertEquals(1, db.programmes().countAll())
+    }
+
+    @Test fun `short guide upgrade retains old cache and binds each regional or opaque request exactly`() = runBlocking {
+        setupFox()
+        val first = db.channels().byId(1)!!.copy(name = "US: FOX East HD", epgChannelId = null)
+        val second = first.copy(id = 2, streamId = "2")
+        val au = first.copy(id = 3, streamId = "3", name = "AU: FOX East HD")
+        db.channels().upsertAll(listOf(first, second, au))
+        val legacy = "opentv.provider-short.7.foxeast"
+        db.programmes().upsertAll(listOf(p(legacy, now)))
+        db.epgAliases().upsertAll(listOf(EpgChannelAlias(1, legacy, "FOX East", "foxeast")))
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            val short = chain.request().url.queryParameter("action") == "get_short_epg"
+            val stream = chain.request().url.queryParameter("stream_id")
+            val body = if (short) """{"epg_listings":[{"title":"Stream $stream","start_timestamp":1800000000,"stop_timestamp":1800003600}]}"""
+                else "<tv></tv>"
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                .body(body.toResponseBody("application/json".toMediaType())).build()
+        }.build()
+        val r = EpgRepository(context, db, db.programmes(), db.epgFeeds(), db.epgAliases(), db.channels(),
+            db.sources(), XtreamApi(client), client, maintenanceAllowed = { false }, recoverStorage = { false })
+        // Existing bulk cache/failure state skips the XMLTV replacement; legacy alias coexists.
+        db.epgFeeds().update(db.epgFeeds().all().single().copy(lastAttemptMillis = now, failureCount = 1))
+        r.syncAll(now)
+        val expected = listOf(first, second, au).map { c ->
+            val id = EpgRepository.providerShortEpgId(7, "foxeast", ChannelGrouping.shortGuideKey(c))
+            assertEquals(id, db.channels().byId(c.id)!!.matchedEpgId)
+            assertEquals("Stream ${c.streamId}", db.programmes().upcoming(id, now, 10).single().title)
+            id
+        }
+        assertEquals(3, expected.distinct().size)
+        assertEquals(1, db.programmes().upcoming(legacy, now, 10).size) // No risky migration delete.
+        assertEquals(setOf("US: FOX East HD", "AU: FOX East HD", "FOX East"),
+            db.epgAliases().allForAudit().filter { it.epgId != "known" }.map { it.displayName }.toSet())
+    }
+
+    @Test fun `repository candidates include reviewed aliases without crossing source region or overrides`() = runBlocking {
+        fun c(id: Long, name: String, key: String, source: Long = 7, guide: String? = "Science.us") =
+            Channel(id = id, sourceId = source, streamId = "$id", name = name, groupKey = key,
+                qualityRank = id.toInt(), qualityLabel = "quality-$id", categoryId = null, logoUrl = null,
+                epgChannelId = null, matchedEpgId = guide, number = null, streamUrl = "not-used")
+        val first = c(1, "US: Science Channel HD", "sciencechannel")
+        val reviewed = c(2, "US: Science (Discovery) FHD", "sciencediscovery")
+        val region = c(3, "AU: Science HD", "science", guide = "Science.au")
+        val otherSource = first.copy(id = 4, sourceId = 8)
+        val manual = first.copy(id = 5, epgOverrideId = "manual")
+        val rejected = first.copy(id = 6, matchedEpgId = null)
+        db.channels().upsertAll(listOf(first, reviewed, region, otherSource, manual, rejected))
+        val catalog = CatalogRepository(db.sources(), db.channels(), db.categories(), db.movies(), db.series(),
+            db.episodes(), db.positions(), XtreamApi(http), StalkerApi(http), http, AppSettings.get(context))
+        assertEquals(setOf(1L, 2L), catalog.variants(first).map { it.id }.toSet())
+        assertEquals(setOf(2L, 4L), catalog.recordSourceOptions(first).map { it.id }.toSet())
+        assertEquals(listOf(rejected), catalog.variants(rejected))
+        assertEquals(listOf(rejected), catalog.recordSourceOptions(rejected))
+        assertEquals(first, db.channels().byId(1)) // Candidate lookup is read-only.
+    }
+
+    @Test fun `recording clash uses verified alternate and never substitutes a regional or rejected sibling`() = runBlocking {
+        val original = Channel(id = 1, sourceId = 7, streamId = "1", name = "US: ESPN HD",
+            groupKey = "espn", qualityRank = 200, categoryId = null, logoUrl = null, epgChannelId = null,
+            matchedEpgId = "ESPN.us", number = null, streamUrl = "https://example.invalid/live/1.ts")
+        val foreign = original.copy(id = 2, sourceId = 8, name = "AU: ESPN HD", matchedEpgId = "ESPN.au", qualityRank = 400)
+        val verified = original.copy(id = 3, sourceId = 9, qualityRank = 300)
+        db.channels().upsertAll(listOf(original, foreign, verified))
+        db.recordings().insert(Recording(channelId = 999, sourceId = 7, channelName = "Busy", title = "Busy",
+            filePath = "not-used", streamUrl = "not-used", scheduledStartMillis = now,
+            scheduledEndMillis = now + 86_400_000, status = RecordingStatus.SCHEDULED))
+        val recordings = RecordingRepository(db.recordings(), db.seriesRules())
+        val engine = RecordingEngine(context, recordings, SourceRepository(db.sources(), XtreamApi(http), StalkerApi(http)),
+            AppSettings.get(context), db.channels(), repo())
+        val first = recordings.byId(engine.scheduleProgramme(original, p("ESPN.us", now + 3_600_000)))!!
+        assertEquals(9L, first.sourceId)
+        assertEquals(original.id, first.channelId)
+        db.channels().upsertAll(listOf(verified.copy(matchedEpgId = null)))
+        val second = recordings.byId(engine.scheduleProgramme(original, p("ESPN.us", now + 7_200_000)))!!
+        assertEquals(7L, second.sourceId)
+        assertEquals(0, requests) // Simulated scheduling only; no stream/network/service starts.
     }
 }

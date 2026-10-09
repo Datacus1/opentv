@@ -883,8 +883,8 @@ class CatalogRepository(
      * and a channel that is really single-quality gets no switch at all.
      */
     suspend fun variants(channel: Channel): List<Channel> {
-        if (channel.groupKey.isEmpty()) return listOf(channel)
-        val all = channelDao.variantsInGroup(channel.groupKey)
+        val all = ChannelGrouping.variantsFor(channel, channelDao.variantCandidates(
+            channel.groupKey, channel.matchedEpgId, channel.epgOverrideId, channel.epgChannelId))
         return distinctByQuality(all).ifEmpty { listOf(channel) }
     }
 
@@ -895,11 +895,12 @@ class CatalogRepository(
      * the only real way around a provider's single-connection limit (which even TiviMate can't dodge).
      */
     suspend fun recordSourceOptions(channel: Channel): List<Channel> = withContext(Dispatchers.IO) {
-        if (channel.groupKey.isEmpty()) return@withContext listOf(channel)
-        channelDao.variantsInGroup(channel.groupKey)
+        channelDao.variantCandidates(channel.groupKey, channel.matchedEpgId, channel.epgOverrideId, channel.epgChannelId)
+            .filter { ChannelGrouping.sameRecordingIdentity(channel, it) || it.id == channel.id }
             .groupBy { it.sourceId }
             .map { (_, chans) -> chans.maxByOrNull { it.qualityRank } ?: chans.first() }
             .sortedByDescending { it.sourceId == channel.sourceId }
+            .ifEmpty { listOf(channel) }
     }
 
     /**

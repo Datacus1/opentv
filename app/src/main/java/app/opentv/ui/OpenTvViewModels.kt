@@ -25,6 +25,7 @@ import app.opentv.data.model.StreamKind
 import app.opentv.data.parser.displayTitle
 import app.opentv.data.parser.ChannelNameNormalizer
 import app.opentv.data.repo.CatalogRepository
+import app.opentv.data.repo.ChannelGrouping
 import app.opentv.data.repo.GenreGroup
 import app.opentv.data.repo.MovieVariantGroup
 import app.opentv.data.repo.PersonTitle
@@ -334,8 +335,10 @@ class ChannelsViewModel(app: Application) : AndroidViewModel(app) {
         val next: Programme?,
         /** Every programme for this channel inside the guide window, start-ordered. */
         val programmes: List<Programme>,
+        /** Includes same-quality/category duplicates for return focus and user-field updates. */
+        val allVariants: List<Channel> = variants,
     ) {
-        val key: Any get() = if (primary.groupKey.isEmpty()) primary.id else primary.groupKey
+        val key: String = ChannelGrouping.key(primary)
     }
 
     /**
@@ -470,24 +473,19 @@ class ChannelsViewModel(app: Application) : AndroidViewModel(app) {
         // in ready-made, rather than regrouping the whole EPG on every category tap. Grouping is
         // kept out of SQL because the programme query cannot take a channel-id list without
         // hitting SQLite's bound-variable cap, and quality-variant folding is pure list work.
-        val groups = LinkedHashMap<Any, MutableList<Channel>>()
-        for (channel in channels) {
-            val key: Any = channel.groupKey.ifEmpty { channel.id }
-            groups.getOrPut(key) { mutableListOf() } += channel
-        }
+        val groups = ChannelGrouping.groups(channels)
 
         val total = groups.size.coerceAtLeast(1)
         var built = 0
-        return groups.values.map { group ->
-            group.sortByDescending { it.qualityRank }
+        return groups.values.map { unsorted ->
+            val group = unsorted.sortedByDescending { it.qualityRank }
             // Only genuinely different qualities are switchable; identical-quality dupes
             // (same stream in two categories) collapse to one, so no false "2 qualities".
             val variants = distinctByQuality(group)
             val primary = variants.first()
 
-            // Walk every variant's guide-id candidates (override → provider → matched)
-            // and use the first that actually has programmes. An id that never lights up
-            // must not shadow a sibling variant whose id does.
+            // Only identity-verified variants may share a listing. Raw provider IDs and
+            // another region's populated schedule cannot bypass the matcher here.
             val list = app.opentv.data.repo.chooseGuideCandidate(group, byEpgChannel, now)
                 ?.let { id -> byEpgChannel[id] }
                 ?.sortedBy { it.startUtcMillis }
@@ -508,6 +506,7 @@ class ChannelsViewModel(app: Application) : AndroidViewModel(app) {
                 now = list.firstOrNull { it.isLiveAt(now) },
                 next = list.firstOrNull { it.startUtcMillis > now },
                 programmes = list,
+                allVariants = group,
             )
         }
     }
@@ -663,7 +662,7 @@ class ChannelsViewModel(app: Application) : AndroidViewModel(app) {
     /** Hide or show a whole logical channel — every quality variant follows. */
     fun setRowHidden(row: Row, hidden: Boolean) {
         viewModelScope.launch {
-            row.variants.forEach { graph.catalogRepository.setChannelHidden(it.id, hidden) }
+            row.allVariants.forEach { graph.catalogRepository.setChannelHidden(it.id, hidden) }
         }
     }
 
@@ -672,13 +671,13 @@ class ChannelsViewModel(app: Application) : AndroidViewModel(app) {
             // Favouriting the row favourites the logical channel: every variant follows,
             // so the choice survives switching quality.
             val target = !row.primary.favourite
-            row.variants.forEach { graph.catalogRepository.setChannelFavourite(it.id, target) }
+            row.allVariants.forEach { graph.catalogRepository.setChannelFavourite(it.id, target) }
         }
     }
 
     fun hide(row: Row) {
         viewModelScope.launch {
-            row.variants.forEach { graph.catalogRepository.setChannelHidden(it.id, true) }
+            row.allVariants.forEach { graph.catalogRepository.setChannelHidden(it.id, true) }
         }
     }
 

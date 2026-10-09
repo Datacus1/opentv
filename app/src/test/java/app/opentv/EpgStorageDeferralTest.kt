@@ -40,7 +40,10 @@ class EpgStorageDeferralTest {
     private var shortRequests = 0
     private var dropDuringShortRequest = false
     private var cancelDuringShortRequest = false
-    private val syntheticId = EpgRepository.providerShortEpgId(1, "foxeast")
+    private val fox = Channel(id = 1, sourceId = 1, streamId = "1", name = "FOX East", groupKey = "foxeast",
+        categoryId = null, logoUrl = null, epgChannelId = null, number = null, streamUrl = "https://example.invalid/live")
+    private val syntheticId = EpgRepository.providerShortEpgId(1, "foxeast",
+        app.opentv.data.repo.ChannelGrouping.shortGuideKey(fox))
 
     private fun freeBlocks(blocks: Int) {
         ShadowStatFs.registerStats(context.dataDir.absolutePath, 2_000_000, blocks, blocks)
@@ -71,10 +74,7 @@ class EpgStorageDeferralTest {
             url = "https://example.invalid", username = "test", password = "test"))
         db.epgFeeds().insert(EpgFeed(id = 1, name = "Synthetic provider", providerSourceId = 1,
             lastSyncMillis = now, lastAttemptMillis = now, failureCount = 1, lastResult = "Retain"))
-        db.channels().upsertAll(listOf(Channel(id = 1, sourceId = 1, streamId = "1",
-            name = "FOX East", groupKey = "foxeast", categoryId = null, logoUrl = null,
-            epgChannelId = null, matchedEpgId = syntheticId, number = null,
-            streamUrl = "https://example.invalid/live")))
+        db.channels().upsertAll(listOf(fox.copy(matchedEpgId = syntheticId)))
         db.programmes().upsertAll(listOf(Programme(feedId = 1, epgChannelId = syntheticId,
             startUtcMillis = now, endUtcMillis = now + 3_600_000, title = "Cached schedule")))
         db.epgAliases().upsertAll(listOf(EpgChannelAlias(1, syntheticId, "FOX East", "foxeast")))
