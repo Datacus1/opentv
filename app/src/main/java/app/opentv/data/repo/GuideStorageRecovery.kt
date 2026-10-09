@@ -39,10 +39,14 @@ class GuideStorageRecovery(
             val storage = context.getSystemService(StorageManager::class.java)
             if (storage != null) {
                 val uuid = storage.getUuidForPath(context.dataDir)
-                if (storage.getAllocatableBytes(uuid) >= target) {
-                    // The argument is the total allocation target, NOT the free-space shortfall.
+                val allocatable = storage.getAllocatableBytes(uuid)
+                val request = platformReclaimRequest(target, allocatable)
+                Log.i(TAG, "Platform cache estimate=$allocatable target=$target request=$request")
+                if (request > 0L) {
+                    // Request the total goal, or a smaller safe platform allowance. Even a
+                    // partial cache reclamation helps; physical free space remains authoritative.
                     // This does not create a reservation file or guarantee against other writers.
-                    storage.allocateBytes(uuid, target)
+                    storage.allocateBytes(uuid, request)
                 }
             }
         }
@@ -79,11 +83,15 @@ class GuideStorageRecovery(
             }
             processLastAttempt = now
             bestEffort { writeLastAttempt(now) }
+            Log.i(TAG, "Idle cache recovery started")
             bestEffort { trimOwnCache() }
-            if (hasReserve()) return@withLock true
+            if (hasReserve()) {
+                Log.i(TAG, "Own cache recovery restored reserve")
+                return@withLock true
+            }
             if (!isIdle()) return@withLock false
             bestEffort { requestPlatformSpace(EpgRepository.SOFT_FREE_RESERVE_BYTES) }
-            hasReserve()
+            hasReserve().also { ready -> Log.i(TAG, "Cache recovery reserveReady=$ready") }
         }
     }
 
@@ -107,6 +115,8 @@ class GuideStorageRecovery(
     }
 
     companion object {
+        internal fun platformReclaimRequest(target: Long, allocatable: Long): Long =
+            minOf(target.coerceAtLeast(0L), allocatable.coerceAtLeast(0L))
         internal val RETRY_INTERVAL_MILLIS = TimeUnit.HOURS.toMillis(1)
         private const val TAG = "GuideStorageRecovery"
         private const val PREFERENCES = "guide-storage-recovery"

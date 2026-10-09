@@ -73,25 +73,36 @@ object GuideCoverageAudit {
         aliases: List<EpgChannelAlias>,
         coverage: List<GuideCoverageRow>,
         storageBlocked: Boolean,
+        checkCancellation: () -> Unit = {},
     ): List<GuideChannelAudit> {
+        checkCancellation()
         val enabledIds = feeds.filter { it.enabled && !it.deleting }.mapTo(HashSet()) { it.id }
         val disabledIds = feeds.filter { !it.enabled && !it.deleting }.mapTo(HashSet()) { it.id }
         val enabledCoverage = coverage.filter { it.feedId in enabledIds }.groupBy { it.epgChannelId }
         val disabledCoverage = coverage.filter { it.feedId in disabledIds }.groupBy { it.epgChannelId }
         val populated = enabledCoverage.filterValues { rows -> rows.any { it.totalRows > 0 } }.keys
         val usableAliases = aliases.filter { it.feedId in enabledIds && it.epgId in populated }
-        val index = EpgMatcher.buildIndex(usableAliases.map { it.epgId to it.displayName })
-        // Normalize once, not once per unmatched provider channel on the TV's CPU.
-        val diagnosticKeys = usableAliases.flatMap { alias ->
-            listOf(alias.displayName, alias.epgId).map { name ->
-                alias.epgId to ChannelNameNormalizer.normalize(name).groupKey
-            }
-        }.distinct()
+        val index = EpgMatcher.buildIndex(usableAliases.map { it.epgId to it.displayName }, checkCancellation)
         val disabledIndex = EpgMatcher.buildIndex(
             aliases.filter { it.feedId in disabledIds }.map { it.epgId to it.displayName },
+            checkCancellation,
         )
+        // Quality variants frequently repeat a provider id or normalized station name. Null
+        // matches need an explicit wrapper: Map.getOrPut with null would recompute each miss.
+        data class MatchResult(val id: String?, val ambiguous: Boolean)
+        val enabledMatches = HashMap<Pair<String, String?>, MatchResult>()
+        val disabledMatches = HashMap<Pair<String, String?>, MatchResult>()
+        fun match(index: EpgMatcher.Index, cache: MutableMap<Pair<String, String?>, MatchResult>,
+            key: String, providerId: String?): MatchResult = cache.getOrPut(key to providerId) {
+            val id = index.matchProvider(key, providerId)
+            MatchResult(id, id == null && index.hasAmbiguousPrefix(key))
+        }
+        val normalizedNames = HashMap<String, String>()
+        fun normalized(name: String) = normalizedNames.getOrPut(name) {
+            ChannelNameNormalizer.normalize(name).groupKey
+        }
         fun logicalKey(channel: Channel) = channel.sourceId to channel.groupKey.ifBlank {
-            ChannelNameNormalizer.normalize(channel.name).groupKey.ifBlank { "id:${channel.id}" }
+            normalized(channel.name).ifBlank { "id:${channel.id}" }
         }
         val logicalCandidates = channels.filterNot { it.hidden }.groupBy(::logicalKey).mapValues { (_, variants) ->
             val ordered = variants.sortedByDescending { it.qualityRank }
@@ -102,8 +113,10 @@ object GuideCoverageAudit {
                 enabledCoverage[id]?.any { it.currentRows > 0 } == true
             }
         }
-        return channels.sortedBy { it.id }.map { channel ->
-            val key = ChannelNameNormalizer.normalize(channel.name).groupKey
+        checkCancellation()
+        return channels.sortedBy { it.id }.mapIndexed { position, channel ->
+            if (position % 64 == 0) checkCancellation()
+            val key = normalized(channel.name)
             val candidates = channel.epgCandidates.filter(String::isNotBlank).distinct()
             fun hasCurrent(id: String) = enabledCoverage[id]?.any { it.currentRows > 0 } == true
             fun hasUpcoming(id: String) = enabledCoverage[id]?.any { it.upcomingRows > 0 } == true
@@ -114,7 +127,8 @@ object GuideCoverageAudit {
             }
             val chosen = override ?: candidates.firstOrNull(::hasCurrent)
                 ?: candidates.firstOrNull(::hasUpcoming) ?: candidates.firstOrNull(::hasRows)
-            val suggested = index.matchProvider(key, channel.epgChannelId)
+            val suggestedMatch = match(index, enabledMatches, key, channel.epgChannelId)
+            val suggested = suggestedMatch.id
             val unappliedUsefulMatch = override == null && suggested != null && suggested !in candidates &&
                 (hasCurrent(suggested) || hasUpcoming(suggested))
             val status = when {
@@ -123,9 +137,9 @@ object GuideCoverageAudit {
                 chosen != null && hasUpcoming(chosen) -> GuideCoverageStatus.UPCOMING_ONLY
                 chosen != null && hasRows(chosen) -> GuideCoverageStatus.EXPIRED
                 candidates.any { it in disabledCoverage } ||
-                    disabledIndex.matchProvider(key, channel.epgChannelId) != null ->
+                    match(disabledIndex, disabledMatches, key, channel.epgChannelId).id != null ->
                     GuideCoverageStatus.DISABLED_FEED
-                suggested == null && ambiguousName(key, diagnosticKeys) -> GuideCoverageStatus.AMBIGUOUS
+                suggestedMatch.ambiguous -> GuideCoverageStatus.AMBIGUOUS
                 else -> GuideCoverageStatus.UNRESOLVED
             }
             val chosenRows = chosen?.let(enabledCoverage::get).orEmpty()
@@ -149,23 +163,10 @@ object GuideCoverageAudit {
         val boundedOffset = offset.coerceIn(0, rows.size)
         return GuideCoveragePage(
             total = rows.size, offset = boundedOffset,
-            rows = rows.drop(boundedOffset).take(limit.coerceIn(1, 200)),
+            rows = rows.subList(boundedOffset,
+                (boundedOffset + limit.coerceIn(1, 200)).coerceAtMost(rows.size)).toList(),
             counts = rows.groupingBy { it.status }.eachCount(),
         )
-    }
-
-    private fun ambiguousName(key: String, aliases: List<Pair<String, String>>): Boolean {
-        if (key.length < 2) return false
-        val ids = HashSet<String>()
-        for ((id, aliasKey) in aliases) {
-            if (aliasKey.length >= 2 &&
-                key.contains("plus") == aliasKey.contains("plus") &&
-                (aliasKey.startsWith(key) || key.startsWith(aliasKey))) {
-                ids += id
-                if (ids.size > 1) return true
-            }
-        }
-        return false
     }
 
     private fun safeLabel(value: String): String = value

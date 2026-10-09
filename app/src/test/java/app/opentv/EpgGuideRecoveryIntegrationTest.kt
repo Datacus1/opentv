@@ -10,6 +10,9 @@ import app.opentv.data.repo.EpgRepository
 import app.opentv.data.repo.GuideCoverageStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Response
@@ -27,6 +30,8 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /** Real Room/repository, fake HTTP and synthetic StatFs. No Shield or real provider is contacted. */
 @RunWith(RobolectricTestRunner::class)
@@ -187,6 +192,25 @@ class EpgGuideRecoveryIntegrationTest {
         val result = repo(allowed = { false }, perFeed = 1000, total = 501).syncAll(now, true)
         assertEquals(0, result.feedsFailed); assertTrue(result.programmesWritten > 250)
         assertEquals(501, db.programmes().countAll()); assertEquals(2, requests)
+    }
+    @Test fun `read only audit does not wait behind a network refresh mutex`() = runBlocking {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            entered.countDown()
+            check(release.await(10, TimeUnit.SECONDS)) { "Synthetic test gate expired" }
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                .body(xml(listOf(p("known", now))).toResponseBody("application/xml".toMediaType())).build()
+        }.build()
+        val r = EpgRepository(context, db, db.programmes(), db.epgFeeds(), db.epgAliases(), db.channels(),
+            db.sources(), XtreamApi(client), client, maintenanceAllowed = { false }, recoverStorage = { false })
+        val sync = async(Dispatchers.IO) { r.syncAll(now, true) }
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            val rows = withTimeout(2_000) { r.auditChannels(now) }
+            assertEquals(GuideCoverageStatus.ACTUAL_CURRENT, rows.single().status)
+        } finally { release.countDown() }
+        assertEquals(0, sync.await().feedsFailed)
     }
     private suspend fun setupFox() {
         db.sources().insert(Source(id = 7, name = "Synthetic", kind = SourceKind.XTREAM,

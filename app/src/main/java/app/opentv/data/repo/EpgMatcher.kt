@@ -34,7 +34,10 @@ object EpgMatcher {
 
     class Index internal constructor(
         private val exact: Map<String, String>,
-        private val sortedKeys: List<Alias>,
+        private val sortedKeys: List<String>,
+        /** Null is an ambiguous key, distinct from a key absent from the map. */
+        private val keyIds: Map<String, String?>,
+        private val keyLengths: List<Int>,
     ) {
         /**
          * Matches a provider channel using its explicit XMLTV id before falling back to its
@@ -80,22 +83,43 @@ object EpgMatcher {
 
             exact[groupKey]?.let { return it }
 
-            // Prefix tier: the provider name extends the guide name or vice versa
-            // ("skysportsmainevent" vs "skysportsmainevt"; "bbcone" vs "bbconelondon").
-            // Only accepted when every candidate agrees on a single epg id.
+            return prefixResult(groupKey).first
+        }
+
+        /** Shares the indexed prefix tier with diagnostics instead of scanning every alias again. */
+        fun hasAmbiguousPrefix(groupKey: String): Boolean = prefixResult(groupKey).second
+
+        private fun prefixResult(groupKey: String): Pair<String?, Boolean> {
+            if (groupKey.length < MIN_KEY_LENGTH) return null to false
             var found: String? = null
-            for (alias in sortedKeys) {
-                val hit = (alias.key.length >= MIN_KEY_LENGTH) &&
-                    (groupKey.contains("plus") == alias.key.contains("plus")) &&
-                    (alias.key.startsWith(groupKey) || groupKey.startsWith(alias.key))
-                if (!hit) continue
-                if (found == null) {
-                    found = alias.epgId
-                } else if (found != alias.epgId) {
-                    return null // ambiguous — refuse to guess
-                }
+            val semanticPlus = groupKey.contains("plus")
+            fun merge(key: String): Boolean {
+                if (key.contains("plus") != semanticPlus) return true
+                val id = keyIds[key] ?: return false
+                if (found != null && found != id) return false
+                found = id
+                return true
             }
-            return found
+            // Longer aliases beginning with the provider key occupy one contiguous sorted range.
+            // Binary search jumps over unrelated aliases; an unknown station does not scan an
+            // entire public guide for every quality variant of every provider channel.
+            var low = 0
+            var high = sortedKeys.size
+            while (low < high) {
+                val middle = (low + high) ushr 1
+                if (sortedKeys[middle] < groupKey) low = middle + 1 else high = middle
+            }
+            var position = low
+            while (position < sortedKeys.size && sortedKeys[position].startsWith(groupKey)) {
+                if (!merge(sortedKeys[position++])) return null to true
+            }
+            // The opposite direction needs only hash lookups at lengths that exist in the index.
+            for (length in keyLengths) {
+                if (length >= groupKey.length) break // same-length keys were visited above
+                val prefix = groupKey.substring(0, length)
+                if (keyIds.containsKey(prefix) && !merge(prefix)) return null to true
+            }
+            return found to false
         }
     }
 
@@ -106,12 +130,14 @@ object EpgMatcher {
      * that *do* fill in `epg_channel_id` often use the id form, and it costs nothing to
      * accept either.
      */
-    fun buildIndex(aliases: Iterable<Pair<String, String>>): Index {
+    fun buildIndex(aliases: Iterable<Pair<String, String>>, checkCancellation: () -> Unit = {}): Index {
         val exact = HashMap<String, String>()
         val ambiguous = HashSet<String>()
         val all = ArrayList<Alias>()
 
+        var visited = 0
         for ((epgId, name) in aliases) {
+            if (visited++ % 64 == 0) checkCancellation()
             val candidates = listOf(
                 ChannelNameNormalizer.normalize(name).groupKey,
                 ChannelNameNormalizer.normalize(epgId).groupKey,
@@ -132,7 +158,10 @@ object EpgMatcher {
         }
         ambiguous.forEach(exact::remove)
 
-        return Index(exact, all)
+        checkCancellation()
+        val keys = all.map { it.key }.distinct().sorted()
+        val keyIds = keys.associateWith { key -> if (key in ambiguous) null else exact[key] }
+        return Index(exact, keys, keyIds, keys.map { it.length }.distinct().sorted())
     }
 
     /**

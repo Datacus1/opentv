@@ -7,16 +7,19 @@ package app.opentv.data.repo
 
 import android.content.Context
 import android.os.StatFs
+import android.os.SystemClock
 import android.util.Log
 import androidx.room.withTransaction
 import androidx.sqlite.db.SimpleSQLiteQuery
 import app.opentv.data.db.ChannelDao
+import app.opentv.data.db.GuideCoverageRow
 import app.opentv.data.db.EpgChannelAliasDao
 import app.opentv.data.db.EpgFeedDao
 import app.opentv.data.db.OpenTvDatabase
 import app.opentv.data.db.ProgrammeDao
 import app.opentv.data.db.SourceDao
 import app.opentv.data.model.EpgChannelAlias
+import app.opentv.data.model.Channel
 import app.opentv.data.model.EpgFeed
 import app.opentv.data.model.Programme
 import app.opentv.data.model.Source
@@ -31,6 +34,8 @@ import java.util.concurrent.TimeUnit
 import java.util.zip.GZIPInputStream
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -139,12 +144,30 @@ class EpgRepository(
 
     /** Diagnostic metadata only; never serializes provider models, URLs, titles or credentials. */
     suspend fun auditChannels(now: Long): List<GuideChannelAudit> = withContext(Dispatchers.IO) {
-        mutationMutex.withLock {
-            GuideCoverageAudit.audit(channelDao.allForMatching(), feedDao.all(),
-                aliasDao.allForAudit(), programmeDao.guideCoverage(now),
-                availableBytes() < SOFT_FREE_RESERVE_BYTES)
+        // Never wait for a whole network refresh. Read one consistent local snapshot, then
+        // release the database transaction before CPU classification and response paging.
+        val started = SystemClock.elapsedRealtime()
+        val snapshot = database.withTransaction {
+            AuditSnapshot(channelDao.allForMatching(), feedDao.all(),
+                aliasDao.allForAudit(), programmeDao.guideCoverage(now))
         }
+        val readMillis = SystemClock.elapsedRealtime() - started
+        Log.i(TAG, "Guide audit snapshot: channels=${snapshot.channels.size} " +
+            "aliases=${snapshot.aliases.size} coverage=${snapshot.coverage.size} readMs=$readMillis")
+        val auditContext = currentCoroutineContext()
+        val result = GuideCoverageAudit.audit(snapshot.channels, snapshot.feeds,
+            snapshot.aliases, snapshot.coverage, availableBytes() < SOFT_FREE_RESERVE_BYTES,
+            checkCancellation = { auditContext.ensureActive() })
+        Log.i(TAG, "Guide audit: channels=${result.size} aliases=${snapshot.aliases.size} " +
+            "coverage=${snapshot.coverage.size} readMs=$readMillis " +
+            "classifyMs=${SystemClock.elapsedRealtime() - started - readMillis}")
+        result
     }
+
+    private data class AuditSnapshot(
+        val channels: List<Channel>, val feeds: List<EpgFeed>,
+        val aliases: List<EpgChannelAlias>, val coverage: List<GuideCoverageRow>,
+    )
 
     // ---- Reads -----------------------------------------------------------------------------
 

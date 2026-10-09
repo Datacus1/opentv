@@ -1,4 +1,4 @@
-# Guide storage recovery (.39 candidate)
+# Guide storage recovery (.39 / .40)
 
 This candidate is based on installed `.38` / source `4096400`, not the uninstalled
 `.37` voice build. It does not change players, Netflix mappings, boot scripts,
@@ -11,7 +11,9 @@ SmartTube, Termux, provider credentials or database schema 12.
   estimate is never treated as actual free space.
 - When idle and below the starting reserve, use Coil's own disk-cache owner to
   clear only disposable images, then ask Android (API 26+) to reclaim eligible
-  caches using `StorageManager.allocateBytes(UUID, totalReserve)`. No large
+  caches using `StorageManager.allocateBytes(UUID, min(totalReserve, allocatable))`.
+  `.40` also attempts a smaller positive platform allowance instead of skipping
+  all reclamation when it cannot satisfy the full goal. No large
   reservation file is created. Recheck physical free space afterwards.
 - Attempts are throttled hourly with one small timestamp outside the guide DB.
   Ordinary failures are contained and logged by class only; cancellation propagates.
@@ -90,6 +92,14 @@ Diagnostics have an eight-second timeout. Do not export the app database or prov
 models as a shortcut. A release receiver's DUMP permission must be checked from
 the packaged manifest before use.
 
+`.39` timed out on the real catalog. `.40` takes a short consistent Room snapshot
+without waiting behind the entire network-sync mutex, then classifies outside the
+transaction. Prefix lookup is indexed; quality-variant hits and misses are cached,
+CPU phases observe cancellation, and pagination copies only its requested rows.
+Numeric-only snapshot/classification timings aid hardware verification. These do
+not expose provider URLs, identities or exception text. A Room read transaction
+can briefly serialize with a database writer; this is not a lock-free snapshot.
+
 Every raw channel/quality variant is classified: current listing, upcoming-only,
 expired cache, useful name match not applied, disabled feed, ambiguous, unresolved.
 Logical sibling coverage is separate so duplicate quality variants do not falsely
@@ -102,8 +112,11 @@ manual overrides. Semantic `+` and country/feed-revision distinctions remain gua
 
 ## Deployment and rollback
 
-Candidate `.39-guide-recovery` versionCode 58 is PC-only until a fresh affirmative
-reply authorizes interruption/install. Preserve `.38` recovery APK and UID/data.
+`.39-guide-recovery` versionCode 58 was installed October 8 after a fresh affirmative;
+UID/data were retained, but low space still prevented refresh. `.40-guide-audit-fix`
+versionCode 59 adds the audit/partial-reclamation follow-up. Consult the runbook for
+whether this newer build is installed and its actual live results. Preserve `.38`
+recovery APK and UID/data.
 Do not deploy `.37`, merge voice changes, uninstall Termux, clear NVIDIA stats data,
 delete settings or reboot to test this guide fix without additional authorization.
 One-time removal of an unused temporary installer is distinct from automatic cache

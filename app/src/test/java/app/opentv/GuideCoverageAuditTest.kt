@@ -15,6 +15,8 @@ import app.opentv.data.repo.GuideCoverageStatus
 import app.opentv.data.repo.chooseGuideCandidate
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.coroutines.CancellationException
+import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -195,5 +197,58 @@ class GuideCoverageAuditTest {
         assertFalse(rows.first().logicalCurrentAvailable)
         assertNull(rows.first().logicalGuideId)
         assertTrue(rows.last().logicalCurrentAvailable)
+    }
+
+    @Test
+    fun `catalog scale audit retains all 6600 rows and pages against 1000 aliases`() {
+        val aliases = (0 until 1000).map { alias("guide-$it.us2", "Guide Station $it") }
+        val coverage = (0 until 1000).map { coverage("guide-$it.us2") }
+        val channels = (0 until 6600).map { i ->
+            channel(i.toLong() + 1, "Unknown Provider Station $i", if (i < 1000) "guide-$i.us2" else null)
+                .copy(groupKey = "unknownproviderstation$i")
+        }
+        var checks = 0
+        val started = System.nanoTime()
+        val rows = GuideCoverageAudit.audit(channels, listOf(enabled), aliases, coverage, true) { checks++ }
+        val elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+        assertEquals(6600, rows.size)
+        assertEquals(1000, rows.count { it.status == GuideCoverageStatus.ACTUAL_CURRENT })
+        assertEquals(5600, rows.count { it.status == GuideCoverageStatus.UNRESOLVED })
+        assertTrue(checks > 100) // Cancellation is observed while building indexes and channel rows.
+        val exportedIds = (0 until 6600 step 200).flatMap { GuideCoverageAudit.page(rows, it, 200).rows }
+            .map { it.channelId }
+        assertEquals(rows.map { it.channelId }, exportedIds)
+        // Generous PC regression budget, not a claim about Shield hardware latency.
+        assertTrue("Catalog audit took ${elapsed}ms", elapsed < 8000)
+        println("Guide audit synthetic 6600 channels / 1000 aliases: ${elapsed}ms")
+    }
+
+    @Test
+    fun `catalog scale audit propagates cancellation during index preparation`() {
+        var checks = 0
+        try {
+            GuideCoverageAudit.audit(listOf(channel()), listOf(enabled),
+                (0 until 1000).map { alias("guide-$it", "Guide $it") },
+                (0 until 1000).map { coverage("guide-$it") }, false) {
+                if (++checks == 4) throw CancellationException("stop")
+            }
+            throw AssertionError("Cancellation swallowed")
+        } catch (_: CancellationException) {
+            assertEquals(4, checks)
+        }
+    }
+
+    @Test
+    fun `catalog audit propagates cancellation while emitting exhaustive rows`() {
+        var checks = 0
+        try {
+            GuideCoverageAudit.audit((1L..6600).map { channel(it) }, listOf(enabled), emptyList(),
+                listOf(coverage()), false) {
+                if (++checks == 7) throw CancellationException("stop")
+            }
+            throw AssertionError("Cancellation swallowed")
+        } catch (_: CancellationException) {
+            assertEquals(7, checks)
+        }
     }
 }

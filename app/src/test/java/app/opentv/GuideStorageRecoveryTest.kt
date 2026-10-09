@@ -22,6 +22,13 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = android.app.Application::class)
 class GuideStorageRecoveryTest {
+    @Test fun `platform request permits safe partial recovery without exceeding allowance`() {
+        assertEquals(0L, GuideStorageRecovery.platformReclaimRequest(100L, 0L))
+        assertEquals(0L, GuideStorageRecovery.platformReclaimRequest(100L, -1L))
+        assertEquals(40L, GuideStorageRecovery.platformReclaimRequest(100L, 40L))
+        assertEquals(100L, GuideStorageRecovery.platformReclaimRequest(100L, 100L))
+        assertEquals(100L, GuideStorageRecovery.platformReclaimRequest(100L, 200L))
+    }
     private val context: Context = ApplicationProvider.getApplicationContext()
     private var bytes = EpgRepository.HARD_FREE_FLOOR_BYTES - 1
     private var idle = true
