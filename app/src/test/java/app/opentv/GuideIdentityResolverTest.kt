@@ -141,6 +141,14 @@ class GuideIdentityResolverTest {
             }
         }
         val output = System.getenv("OPENTV_GUIDE_IDENTITY_REPORT")
+        val baseline = System.getenv("OPENTV_GUIDE_IDENTITY_BASELINE")
+        if (!baseline.isNullOrBlank()) {
+            val previous = Json.parseToJsonElement(File(baseline).readText()).jsonArray
+                .associate { it.jsonObject.getValue("channelId") to it.jsonObject.getValue("newMatchedId") }
+            assertEquals(channels.size, previous.size)
+            report.forEach { row -> assertEquals("Optimized identity differs for ${row["channelId"]}",
+                previous[row.getValue("channelId")], row.getValue("newMatchedId")) }
+        }
         if (!output.isNullOrBlank()) File(output).writeText(Json { prettyPrint = true }.encodeToString(
             JsonElement.serializer(), JsonArray(report)))
         println("Actual identities=${channels.size}; accepted=${report.count { it["newMatchedId"] !is JsonNull }}")

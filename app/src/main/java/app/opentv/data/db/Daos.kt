@@ -221,6 +221,12 @@ interface ChannelDao {
     @Query("UPDATE channels SET matchedEpgId = :epgId WHERE id = :id")
     suspend fun setMatchedEpgId(id: Long, epgId: String?)
 
+    /** Repair pre-PLUS-normalizer grouping without overwriting user/provider/playback fields. */
+    @Query("""UPDATE channels SET matchedEpgId = :epgId, displayName = :displayName,
+        groupKey = :groupKey, qualityRank = :qualityRank, qualityLabel = :qualityLabel WHERE id = :id""")
+    suspend fun setGuideIdentityAndGrouping(id: Long, epgId: String?, displayName: String,
+        groupKey: String, qualityRank: Int, qualityLabel: String)
+
     @Query("UPDATE channels SET epgOverrideId = :epgId WHERE id = :id")
     suspend fun setEpgOverride(id: Long, epgId: String?)
 

@@ -38,7 +38,9 @@ foreach ($kind in @('channels', 'aliases')) {
     $unique = if ($kind -eq 'channels') {
         @($rows.channelId | Sort-Object -Unique).Count
     } else {
-        @($rows | ForEach-Object { "$($_.feedId):$($_.guideId)" } | Sort-Object -Unique).Count
+        $identityKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        foreach ($row in $rows) { [void]$identityKeys.Add("$($row.feedId):$($row.guideId)") }
+        $identityKeys.Count
     }
     if ($rows.Count -ne $total -or $unique -ne $total) { throw 'Duplicate or incomplete identity audit.' }
     $result[$kind] = $rows.ToArray()

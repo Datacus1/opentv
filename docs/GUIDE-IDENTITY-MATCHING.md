@@ -50,6 +50,24 @@ validated match do not bypass the guard through their raw ID. The audit exposes
 stored matches that disagree with the current resolver. No schema, retention,
 row-cap, cleanup, player, Netflix-button or boot changes accompany this patch.
 
+The on-device follow-up found eighteen raw whole-word `PLUS` channels still had
+old saved grouping fields. Five collided with their base networks, and a word-PLUS
+Fox Soccer variant did not group with its equivalent `+` variant. Matcher startup
+now repairs only those raw whole-word-PLUS rows using the ordinary catalogue
+normalizer (not the resolver's additional identity-prefix rules). One per-row
+atomic update changes the derived display/group/quality fields and matched ID;
+custom names, favourites, hidden flags, manual overrides, provider/playback fields
+and IDs are preserved. Reserve checks apply before each actual write. Repeated
+passes are idempotent; no catalogue refresh or schema migration is required.
+
+Scoped indexes now reuse immutable, once-prepared normalized alias keys. Literal,
+canonical and exact-name collision rules are unchanged. This addresses the first
+hardware combined audit exceeding its eight-second deadline; the deadline is not
+extended. The exhaustive replay compares every optimized decision with the saved
+pre-optimization result. First-pass summary counts use the updated match, not a
+withdrawn old match. The diagnostic script validates alias uniqueness case-sensitively
+because distinct XMLTV IDs can differ only by case.
+
 ## Exhaustive metadata audit
 
 `GuideAuditReceiver` requires Android's `DUMP` permission. The immutable, process-local
@@ -71,6 +89,8 @@ snapshot offline, set `OPENTV_GUIDE_IDENTITY_FIXTURE` to its absolute path and
 optionally `OPENTV_GUIDE_IDENTITY_REPORT` to a local output path, then run
 `testDebugUnitTest testReleaseUnitTest`. The opt-in replay otherwise skips. Do not
 commit the user's actual catalogue snapshot or export the provider/database models.
+Set `OPENTV_GUIDE_IDENTITY_BASELINE` to a previous replay report to assert complete
+case-sensitive decision equality while testing a performance-only change.
 
 The actual 6,581-variant replay accepted 3,674 identities, quarantined 372 conflicts,
 and left 2,535 without a populated trustworthy identity. Compared with stored

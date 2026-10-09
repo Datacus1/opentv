@@ -23,12 +23,15 @@ import app.opentv.data.parser.ChannelNameNormalizer
  */
 object EpgMatcher {
 
-    /** One guide channel, pre-normalised. */
-    data class Alias(
-        val epgId: String,
-        /** Normalised display-name or id: `bbcone`, `bbc1uk`. */
-        val key: String,
-    )
+    /** Immutable normalization shared by scoped indexes; never re-run regexes per scope. */
+    internal data class PreparedAlias(val epgId: String, val literalId: String,
+        val canonicalId: String, val keys: List<String>)
+
+    internal fun prepareAlias(epgId: String, normalizedName: String): PreparedAlias {
+        val canonical = canonicalGuideIdKey(epgId)
+        return PreparedAlias(epgId, epgId.trim(), canonical,
+            listOf(normalizedName, ChannelNameNormalizer.normalize(epgId).groupKey, canonical).distinct())
+    }
 
     class Index internal constructor(
         private val exact: Map<String, String>,
@@ -98,27 +101,32 @@ object EpgMatcher {
      * accept either.
      */
     fun buildIndex(aliases: Iterable<Pair<String, String>>, checkCancellation: () -> Unit = {}): Index {
+        var visited = 0
+        val prepared = aliases.map { (id, name) ->
+            if (visited++ % 64 == 0) checkCancellation()
+            prepareAlias(id, ChannelNameNormalizer.normalize(name).groupKey)
+        }
+        return buildPreparedIndex(prepared, checkCancellation)
+    }
+
+    internal fun buildPreparedIndex(aliases: Iterable<PreparedAlias>, checkCancellation: () -> Unit = {}): Index {
         val exact = HashMap<String, String>()
         val ambiguous = HashSet<String>()
-        val all = ArrayList<Alias>()
+        val allKeys = HashSet<String>()
         val literalIds = HashMap<String, String>()
         val canonicalCandidates = HashMap<String, MutableSet<String>>()
 
         var visited = 0
-        for ((epgId, name) in aliases) {
+        for (alias in aliases) {
             if (visited++ % 64 == 0) checkCancellation()
-            literalIds[epgId.trim()] = epgId
-            canonicalCandidates.getOrPut(canonicalGuideIdKey(epgId)) { HashSet() }.add(epgId)
-            val candidates = listOf(
-                ChannelNameNormalizer.normalize(name).groupKey,
-                ChannelNameNormalizer.normalize(epgId).groupKey,
-                canonicalGuideIdKey(epgId),
-            ).distinct()
-            for (key in candidates) {
+            val epgId = alias.epgId
+            literalIds[alias.literalId] = epgId
+            canonicalCandidates.getOrPut(alias.canonicalId) { HashSet() }.add(epgId)
+            for (key in alias.keys) {
                 // Full normalisation strips display-name quality markers; the additional
                 // canonical id key tolerates only a terminal guide-feed revision.
                 if (key.length < MIN_KEY_LENGTH) continue
-                all += Alias(epgId, key)
+                allKeys += key
                 val existing = exact.putIfAbsent(key, epgId)
                 if (existing != null && existing != epgId) {
                     // Two different guide channels normalise to the same key. Neither can
@@ -130,8 +138,7 @@ object EpgMatcher {
         ambiguous.forEach(exact::remove)
 
         checkCancellation()
-        val keys = all.map { it.key }.distinct().sorted()
-        val keyIds = keys.associateWith { key -> if (key in ambiguous) null else exact[key] }
+        val keyIds = allKeys.associateWith { key -> if (key in ambiguous) null else exact[key] }
         return Index(exact, literalIds, canonicalCandidates.mapNotNull { (key, ids) ->
             ids.singleOrNull()?.let { key to it }
         }.toMap(), keyIds)

@@ -935,14 +935,20 @@ class EpgRepository(
             // Recompute from the preserved provider name so matcher improvements take effect on
             // an in-place upgrade even before the next catalogue refresh rewrites stored keys.
             val newMatch = resolver.resolve(channel).id
-            if (newMatch != channel.matchedEpgId) {
+            val grouping = if (SEMANTIC_PLUS.containsMatchIn(channel.name))
+                ChannelNameNormalizer.normalize(channel.name) else null
+            val needsGroupingRepair = grouping != null && (channel.groupKey != grouping.groupKey ||
+                channel.displayName != grouping.baseName || channel.qualityRank != grouping.qualityRank ||
+                channel.qualityLabel != grouping.qualityLabel)
+            if (needsGroupingRepair) {
+                ensureHardWriteReserve()
+                channelDao.setGuideIdentityAndGrouping(channel.id, newMatch, grouping!!.baseName,
+                    grouping.groupKey, grouping.qualityRank, grouping.qualityLabel)
+            } else if (newMatch != channel.matchedEpgId) {
                 ensureHardWriteReserve()
                 channelDao.setMatchedEpgId(channel.id, newMatch)
             }
-            if (
-                channel.epgCandidates.any { it in populated } ||
-                    (newMatch != null && newMatch in populated)
-            ) matched++
+            if (channel.copy(matchedEpgId = newMatch).epgCandidates.any { it in populated }) matched++
         }
 
         Log.i(
@@ -980,6 +986,7 @@ class EpgRepository(
 
     companion object {
         private const val TAG = "EpgRepository"
+        private val SEMANTIC_PLUS = Regex("(?i)\\bPLUS\\b")
         private const val DATABASE_NAME = "opentv.db"
 
         const val BATCH_SIZE = 500

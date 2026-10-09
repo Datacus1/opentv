@@ -24,4 +24,20 @@ class GuideExactIdentityTest {
         assertEquals("CuriosityNOW.us", index.matchProvider("curiositynow", "CuriosityNOW.us"))
         assertNull(index.match("curiositynow"))
     }
+
+    @Test fun `prepared scoped keys preserve literal canonical and name collision semantics`() {
+        val aliases = listOf("CuriosityNOW.us" to "Curiosity NOW", "Curiosity.NOW.us2" to "Curiosity NOW",
+            "News.us" to "First", "news.us" to "Second", "NESNplus.us2" to "NESN PLUS",
+            "ESPN.us" to "ESPN", "other" to "Duplicate", "third" to "Duplicate")
+        val ordinary = EpgMatcher.buildIndex(aliases)
+        val prepared = EpgMatcher.buildPreparedIndex(aliases.map { (id, name) ->
+            EpgMatcher.prepareAlias(id, ChannelNameNormalizer.normalize(name).groupKey)
+        })
+        for (id in aliases.map { it.first } + listOf("NEWS.us", "NESNplus.us", "ESPN.us2", "none"))
+            assertEquals(id, ordinary.matchId(id), prepared.matchId(id))
+        for (key in aliases.map { ChannelNameNormalizer.groupKeyOf(it.second) } + listOf("espn2", "nesn")) {
+            assertEquals(key, ordinary.matchProvider(key, null), prepared.matchProvider(key, null))
+            assertEquals(key, ordinary.hasAmbiguousPrefix(key), prepared.hasAmbiguousPrefix(key))
+        }
+    }
 }

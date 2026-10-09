@@ -28,21 +28,25 @@ class GuideIdentityResolver(
     private val usable = aliases.filter { it.feedId in providerFeedSources && it.epgId in populated &&
         it.epgId.trim() !in quarantinedIds }
     private val indexes = HashMap<Scope, EpgMatcher.Index>()
+    private val aliasIdentities = usable.associateWith { identity(it.displayName) }
     private val aliasRegions = usable.associateWith { alias ->
-        identity(alias.displayName).second ?: countryFromId(alias.epgId)
+        aliasIdentities.getValue(alias).second ?: countryFromId(alias.epgId)
     }
-    private val aliasKeys = usable.associateWith { identity(it.displayName).first }
+    private val preparedAliases = usable.mapIndexed { i, alias ->
+        if (i % 64 == 0) checkCancellation()
+        alias to EpgMatcher.prepareAlias(alias.epgId, aliasIdentities.getValue(alias).first)
+    }
     private val decisions = HashMap<Triple<Long, String, String?>, Decision>()
 
     private fun index(scope: Scope) = indexes.getOrPut(scope) {
         checkCancellation()
-        EpgMatcher.buildIndex(usable.filter { alias ->
+        EpgMatcher.buildPreparedIndex(preparedAliases.filter { (alias, _) ->
             (if (scope.publicOnly) providerFeedSources[alias.feedId] == null
                 else providerFeedSources[alias.feedId] == scope.source) &&
                 (scope.region == null || aliasRegions[alias] == scope.region ||
                     (aliasRegions[alias] == null && !scope.region.startsWith("REGION:"))) &&
                 (scope.include4k || !FOUR_K.containsMatchIn(alias.displayName))
-        }.map { it.epgId to aliasKeys.getValue(it) }, checkCancellation)
+        }.map { it.second }, checkCancellation)
     }
 
     fun resolve(channel: Channel): Decision {

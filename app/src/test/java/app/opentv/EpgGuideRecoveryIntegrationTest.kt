@@ -75,6 +75,46 @@ class EpgGuideRecoveryIntegrationTest {
     }
     @After fun close() = db.close()
 
+    @Test fun `matcher summary excludes withdrawn stale match on its first pass and keeps manual override`() = runBlocking {
+        val original = db.channels().allForMatching().single()
+        db.channels().upsertAll(listOf(original.copy(name = "Unrelated", epgChannelId = null)))
+        assertEquals(0, repo().runMatcher().first)
+        assertNull(db.channels().allForMatching().single().matchedEpgId)
+        db.channels().upsertAll(listOf(original.copy(name = "Unrelated", epgChannelId = null,
+            epgOverrideId = "known")))
+        assertEquals(1, repo().runMatcher().first)
+        val row = db.channels().allForMatching().single()
+        assertNull(row.matchedEpgId); assertEquals("known", row.epgOverrideId)
+    }
+
+    @Test fun `PLUS grouping repair separates base joins symbol variants and preserves every unrelated field`() = runBlocking {
+        val original = db.channels().allForMatching().single().copy(id = 2, streamId = "plus",
+            name = "US: MeTV PLUS HD", displayName = "MeTV", groupKey = "metv", qualityRank = 0,
+            epgChannelId = "MeTVplus.us", matchedEpgId = "known", epgOverrideId = "manual",
+            customName = "My Plus", favourite = true, hidden = true, sortIndex = 91,
+            tvArchive = true, tvArchiveDays = 7, lastSeenMillis = 1234)
+        val symbolic = original.copy(id = 3, streamId = "symbol", name = "US: MeTV + SD",
+            displayName = "MeTV +", groupKey = "metvplus", qualityRank = 100, qualityLabel = "SD")
+        val base = original.copy(id = 4, streamId = "base", name = "US: MeTV HD", epgChannelId = "MeTV.us")
+        db.channels().upsertAll(listOf(original, symbolic, base))
+        db.epgAliases().upsertAll(listOf(EpgChannelAlias(1, "MeTVplus.us", "MeTV PLUS", "metvplus"),
+            EpgChannelAlias(1, "MeTV.us", "MeTV", "metv")))
+        db.programmes().upsertAll(listOf(p("MeTVplus.us", now), p("MeTV.us", now)))
+        repo().runMatcher()
+        val repaired = db.channels().allForMatching().first { it.id == 2L }
+        val normalized = app.opentv.data.parser.ChannelNameNormalizer.normalize(original.name)
+        assertEquals(original.copy(displayName = normalized.baseName, groupKey = normalized.groupKey,
+            qualityRank = normalized.qualityRank, qualityLabel = normalized.qualityLabel,
+            matchedEpgId = "MeTVplus.us"), repaired)
+        val rows = db.channels().allForMatching().associateBy { it.id }
+        assertEquals(rows[3]!!.groupKey, repaired.groupKey)
+        assertNotEquals(rows[4]!!.groupKey, repaired.groupKey)
+        val beforeSecondPass = db.channels().allForMatching()
+        repo().runMatcher()
+        assertEquals(beforeSecondPass, db.channels().allForMatching())
+        assertEquals(0, requests)
+    }
+
     @Test fun `low reserve stays read only when recovery cannot restore space`() = runBlocking {
         blocks(262_144); var attempts = 0
         val r = repo(recover = { attempts++; false })
