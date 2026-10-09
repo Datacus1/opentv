@@ -401,6 +401,12 @@ interface EpgChannelAliasDao {
     @Query("SELECT COUNT(*) FROM epg_channels")
     suspend fun count(): Int
 
+    @Query("SELECT COUNT(*) FROM epg_channels WHERE feedId = :feedId")
+    suspend fun countForFeed(feedId: Long): Int
+
+    @Query("SELECT EXISTS(SELECT 1 FROM epg_channels WHERE feedId = :feedId AND epgId = :epgId)")
+    suspend fun contains(feedId: Long, epgId: String): Boolean
+
     @Upsert
     suspend fun upsertAll(aliases: List<EpgChannelAlias>)
 

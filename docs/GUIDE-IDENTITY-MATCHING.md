@@ -145,19 +145,27 @@ preventing another opaque sibling's successful request from lighting up this one
 The resolver decision cache includes the complete short key. Legacy rows remain
 readable through existing persisted matches until recomputation and age under the
 ordinary retention policy; no migration delete or unbounded cleanup is added.
+Catalogue churn cannot accumulate new aliases without limit: the existing
+20,000-alias/feed cap is checked before short-guide HTTP and again atomically
+before programme/alias writes. Exact existing `(feedId, epgId)` updates still work
+at or above the cap. New identities defer with the existing bounded retry policy;
+no aliases or working listings are deleted to make room. Other feeds' aliases do
+not consume this feed's budget.
 
 No schema, channel IDs, user-field migration, reserves, retention/caps, player,
 Netflix/boot or provider configuration change is needed. The installed .45 remains
 unchanged until a freshly authorized in-place update. .46 is based on .45/.42/.38,
 not the uninstalled .37 voice candidate.
 
-Offline validation: 556 tests passed across debug/release, 2 opt-in tests skipped;
+Offline validation: 560 tests passed across debug/release, 2 opt-in tests skipped;
 release-critical lint, R8 and packaging passed. An independent reviewer checked
 all 6,581 saved matcher decisions against the baseline (zero changes), all consumer
 results (6,445 groups; zero unresolved borrowers/stale disagreements), US/AU ESPN,
 Caribbean rejection, short-guide provenance and recording fallback. Real Room/fake
 HTTP tests cover legacy-cache coexistence, opaque siblings, region separation,
 candidate superset queries and actual simulated recording-clash scheduling.
+Repeated request-identity churn stops at the unchanged alias cap with zero HTTP
+for new identities; existing identities refresh at/above it, and caps are per feed.
 
 `ChannelGroupingTest` replays the same safe local fixture as the matcher. Optional
 `OPENTV_GUIDE_GROUPING_REPORT` writes only the metadata consumer result. Actual

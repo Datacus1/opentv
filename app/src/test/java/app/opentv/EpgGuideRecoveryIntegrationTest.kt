@@ -457,4 +457,66 @@ class EpgGuideRecoveryIntegrationTest {
         assertEquals(7L, second.sourceId)
         assertEquals(0, requests) // Simulated scheduling only; no stream/network/service starts.
     }
+
+    @Test fun `short guide alias churn stops at existing cap but existing identities refresh above it`() = runBlocking {
+        setupFox()
+        val originals = listOf(db.channels().byId(1)!!, db.channels().byId(2)!!)
+        db.epgAliases().upsertAll((1 until EpgRepository.MAX_ALIASES_PER_FEED - 1).map {
+            EpgChannelAlias(1, "unused-$it", "Unused $it", "unused$it")
+        })
+        assertEquals(EpgRepository.MAX_ALIASES_PER_FEED - 1, db.epgAliases().countForFeed(1))
+        // Fresh bulk cooldown isolates short-guide capacity from genuine persisted failures.
+        db.epgFeeds().update(db.epgFeeds().all().single().copy(lastSyncMillis = now, lastAttemptMillis = now, failureCount = 0))
+        var calls = 0
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            check(chain.request().url.queryParameter("action") == "get_short_epg")
+            calls++
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                .body("""{"epg_listings":[{"title":"Version $calls","start_timestamp":1800000000,"stop_timestamp":1800003600}]}"""
+                    .toResponseBody("application/json".toMediaType())).build()
+        }.build()
+        val r = EpgRepository(context, db, db.programmes(), db.epgFeeds(), db.epgAliases(), db.channels(),
+            db.sources(), XtreamApi(client), client, maintenanceAllowed = { false }, recoverStorage = { false })
+        assertFalse(r.syncAll(now).retryNeeded)
+        assertEquals(1, calls)
+        val scoped = db.channels().byId(1)!!.matchedEpgId!!
+        assertEquals(EpgRepository.MAX_ALIASES_PER_FEED, db.epgAliases().countForFeed(1))
+        repeat(4) { iteration ->
+            db.channels().upsertAll(originals.map { it.copy(epgChannelId = "churn-$iteration") })
+            assertTrue(r.syncAll(now + iteration + 1).retryNeeded)
+            assertEquals(1, calls) // No HTTP at cap for a new request identity.
+            assertEquals(EpgRepository.MAX_ALIASES_PER_FEED, db.epgAliases().countForFeed(1))
+            assertEquals(2, db.programmes().countAll())
+        }
+        db.channels().upsertAll(originals)
+        assertFalse(r.syncAll(now + 10).retryNeeded)
+        assertEquals(2, calls)
+        assertEquals("Version 2", db.programmes().upcoming(scoped, now, 1).single().title)
+        db.epgAliases().upsertAll(listOf(EpgChannelAlias(1, "legacy-over-cap", "Legacy", "legacy")))
+        assertFalse(r.syncAll(now + 20).retryNeeded)
+        assertEquals(3, calls)
+        assertEquals(EpgRepository.MAX_ALIASES_PER_FEED + 1, db.epgAliases().countForFeed(1))
+        assertEquals("Version 3", db.programmes().upcoming(scoped, now, 1).single().title)
+    }
+
+    @Test fun `short guide alias capacity is per feed not consumed by another providers cache`() = runBlocking {
+        setupFox()
+        db.epgFeeds().insert(EpgFeed(2, "Other", enabled = false, providerSourceId = 8))
+        db.epgAliases().upsertAll((0 until EpgRepository.MAX_ALIASES_PER_FEED).map {
+            EpgChannelAlias(2, "other-$it", "Other $it", "other$it")
+        })
+        db.epgFeeds().update(db.epgFeeds().all().first { it.id == 1L }.copy(lastSyncMillis = now, lastAttemptMillis = now, failureCount = 0))
+        var calls = 0
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            check(chain.request().url.queryParameter("action") == "get_short_epg"); calls++
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                .body("""{"epg_listings":[{"title":"New","start_timestamp":1800000000,"stop_timestamp":1800003600}]}"""
+                    .toResponseBody("application/json".toMediaType())).build()
+        }.build()
+        val r = EpgRepository(context, db, db.programmes(), db.epgFeeds(), db.epgAliases(), db.channels(),
+            db.sources(), XtreamApi(client), client, maintenanceAllowed = { false }, recoverStorage = { false })
+        assertFalse(r.syncAll(now).retryNeeded)
+        assertEquals(1, calls); assertEquals(2, db.epgAliases().countForFeed(1))
+        assertEquals(EpgRepository.MAX_ALIASES_PER_FEED, db.epgAliases().countForFeed(2))
+    }
 }

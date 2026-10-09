@@ -451,8 +451,8 @@ class EpgRepository(
 
                 // Some Xtream panels omit individual channels from their bulk XMLTV while their
                 // bounded per-stream endpoint still has a schedule. FOX East is verified to need
-                // that fallback on this provider. This adds at most 100 rows per source and never
-                // downloads a second regional/national guide.
+                // that fallback on this provider. Requests are bounded to 100 rows per safe
+                // request group and the shared row/alias caps, not another regional bulk guide.
                 val shortGuide = syncProviderShortEpgFallbacksLocked(nowUtcMillis, force)
                 written += shortGuide.written
 
@@ -527,6 +527,13 @@ class EpgRepository(
                 if (!force && cachedThrough >= nowUtcMillis + MIN_CACHED_FUTURE_MILLIS) {
                     continue
                 }
+                // mutationMutex serializes all guide writers. Expiry removes programmes, not
+                // aliases: bound new request identities even after repeated catalogue churn.
+                // Existing keys may still update at/above the unchanged alias cap.
+                if (!aliasDao.contains(feed.id, syntheticId) && aliasDao.countForFeed(feed.id) >= MAX_ALIASES_PER_FEED) {
+                    retryNeeded = true
+                    continue
+                }
                 if (cachedThrough == 0L && (programmeDao.countForFeed(feed.id) >= rowLimitPerFeed ||
                         programmeDao.countAll() >= rowLimitTotal)) {
                     retryNeeded = true
@@ -578,10 +585,13 @@ class EpgRepository(
                 }
 
                 try {
-                    database.withTransaction {
+                    val committed = database.withTransaction {
                         // Space can fall while the request is in flight. Keep the existing
                         // hard floor and commit programmes plus their alias together, or neither.
                         ensureHardWriteReserve()
+                        if (!aliasDao.contains(feed.id, syntheticId) && aliasDao.countForFeed(feed.id) >= MAX_ALIASES_PER_FEED) {
+                            return@withTransaction false
+                        }
                         programmeDao.upsertAll(programmes)
                         aliasDao.upsertAll(
                             listOf(EpgChannelAlias(
@@ -591,6 +601,11 @@ class EpgRepository(
                                 normalizedKey = GuideIdentityResolver.identity(variants.first().name).first,
                             )),
                         )
+                        true
+                    }
+                    if (!committed) {
+                        retryNeeded = true
+                        continue
                     }
                 } catch (_: StorageReserveException) {
                     Log.w(TAG, "Short EPG refresh deferred: storage reserve; cached guide retained")
