@@ -1,4 +1,4 @@
-# Guide storage recovery (.39 / .40)
+# Guide storage recovery (.39 / .40 / .41)
 
 This candidate is based on installed `.38` / source `4096400`, not the uninstalled
 `.37` voice build. It does not change players, Netflix mappings, boot scripts,
@@ -6,7 +6,7 @@ SmartTube, Termux, provider credentials or database schema 12.
 
 ## Policy
 
-- Start guide writes only with **1.25 GiB physically free**. Stop ingestion below
+- Start guide downloads/ingestion only with **1.25 GiB physically free**. Stop ingestion below
   **1.10 GiB**. Unknown storage measurements fail closed. Android's allocation
   estimate is never treated as actual free space.
 - When idle and below the starting reserve, use Coil's own disk-cache owner to
@@ -23,6 +23,17 @@ SmartTube, Termux, provider credentials or database schema 12.
   30 minutes, and uses a shared maximum of **eight 1,000-row transactions** per pass.
   Pending deleted-feed tombstones resume offline. Idle/storage guards are rechecked
   between batches and before atomic alias/feed finalization.
+- `.41` fixes the recovery deadlock where low space blocked expiry maintenance too.
+  Below the download reserve, idle expired-only cleanup requires the unchanged hard
+  floor plus **32 MiB headroom**, with **four 100-row transactions** maximum per
+  invocation. Check idle state then remeasure free space before each batch. Only
+  programmes older than the one-past-day retention are retired; no current rows,
+  feed metadata, aliases or settings are reconciled by this recovery tier.
+  Idle WAL truncation no longer requires the download reserve, but both passive
+  and idle checkpoints reserve logical database extension plus 32 MiB working space.
+  Below hard floor nothing in this tier mutates the database; more disposable
+  storage may still be necessary. A 400-row pass is deliberately small, not instant
+  bulk repair. Healthy-reserve maintenance retains its larger eight-batch budget.
 - SQL deletion makes database pages reusable; it does **not** promise that the main
   database shrinks on disk. No `VACUUM`, unbounded programme deletion or data reset.
 
@@ -111,6 +122,26 @@ variants before UI deduplication and prefers a current listing, preserving popul
 manual overrides. Semantic `+` and country/feed-revision distinctions remain guarded.
 
 ## Deployment and rollback
+
+`.41-storage-diagnostics` versionCode 60 adds the above recovery gate and numeric-only
+storage inspector, using the same DUMP-protected receiver:
+
+```text
+adb -s 192.168.1.186:5555 shell am broadcast -a app.opentv.STORAGE_AUDIT -n app.opentv/.data.repo.GuideAuditReceiver --receiver-foreground
+```
+
+It reports actual DB/WAL size, page/freelist counts, trusted table row counts, anonymous
+feed age counts and bounded owned directory sizes, not contents/paths/private settings.
+Per-table allocated bytes are null if Android lacks `dbstat`. A first cold-process
+request may return no data; don't treat that as an audit or combine invented results.
+On October 8 `.41` was installed in place, UID/data preserved, with 474 offline tests
+passed. Actual DB97.13MiB/WAL0.50MiB and247,736 programme rows (99.5% expired)
+confirm stranded over-cap data. Older stored-row caps depended on post-import idle
+maintenance; `.39/.40` pre-write guards already prevent further over-cap growth.
+Final device free ~1.042GiB is still below hard; neither actual expiry retirement nor
+successful fresh ingestion is proved. Root runbook and `storage-root-cause-41/RESULTS.md`
+are authoritative for exact evidence, artifact hashes and unresolved whole-partition
+space-loss attribution. This does not authorize other-app or recording deletion.
 
 `.39-guide-recovery` versionCode 58 was installed October 8 after a fresh affirmative;
 UID/data were retained, but low space still prevented refresh. `.40-guide-audit-fix`
