@@ -122,16 +122,23 @@ class EpgRepository(
         if (availableBytes() < SOFT_FREE_RESERVE_BYTES) {
             if (recoverStorage != null) recoverStorage.invoke() else recovery.recover()
         }
+        updateStorageHealth()
+    }
+
+    private fun updateStorageHealth(): Boolean {
         val free = availableBytes()
         val ready = free >= SOFT_FREE_RESERVE_BYTES
         _health.value = _health.value.copy(storageBlocked = !ready, freeBytes = free)
-        ready
+        return ready
     }
 
     /** Offline, independently scheduled maintenance; never depends on a successful feed request. */
     suspend fun maintainCache(nowUtcMillis: Long): Boolean = withContext(Dispatchers.IO) {
         mutationMutex.withLock {
-            if (!prepareStorage()) return@withLock false
+            if (!prepareStorage()) {
+                runRecoveryMaintenanceLocked(nowUtcMillis)
+                if (!updateStorageHealth()) return@withLock false
+            }
             maintenanceBatchesRemaining = MAINTENANCE_MAX_BATCHES
             resumePendingDeletionsLocked()
             runBoundedRetentionLocked(nowUtcMillis)
@@ -317,11 +324,14 @@ class EpgRepository(
     suspend fun syncAll(nowUtcMillis: Long, force: Boolean = false): SyncSummary =
         withContext(Dispatchers.IO) {
             mutationMutex.withLock {
-                // A deferral is read-only: do not grow the WAL with failure metadata, feed
-                // migrations or matching updates when storage is already below the reserve.
+                // Below the download reserve, only small idle expired-row retirement is
+                // allowed above hard floor + headroom. No failure/feed/matcher writes.
                 if (!prepareStorage()) {
-                    Log.w(TAG, "Guide refresh deferred: low free space; cached guide retained")
-                    return@withLock cachedSummary(0, 0, 0, nowUtcMillis, storageDeferred = true)
+                    runRecoveryMaintenanceLocked(nowUtcMillis)
+                    if (!updateStorageHealth()) {
+                        Log.w(TAG, "Guide refresh deferred: low free space; cached guide retained")
+                        return@withLock cachedSummary(0, 0, 0, nowUtcMillis, storageDeferred = true)
+                    }
                 }
                 _health.value = _health.value.copy(refreshing = true)
                 try {
@@ -698,6 +708,21 @@ class EpgRepository(
             programmeDao.countAll().toLong() + newRows <= rowLimitTotal
     }
 
+    private suspend fun runRecoveryMaintenanceLocked(nowUtcMillis: Long) {
+        suspend fun ready() = maintenanceAllowed() && GuideRecoveryMaintenancePolicy.mayStart(availableBytes(), true)
+        if (!ready()) return
+        // Reclaim already-checkpointed WAL high-water first; never unlink a journal manually.
+        truncateWalWhenIdle()
+        repeat(GuideRecoveryMaintenancePolicy.MAX_BATCHES) {
+            if (!ready()) return
+            val removed = programmeDao.deleteExpiredBatch(nowUtcMillis - RETENTION_PAST_MILLIS,
+                GuideRecoveryMaintenancePolicy.BATCH_ROWS)
+            if (removed == 0) return
+            yield()
+        }
+        truncateWalWhenIdle()
+    }
+
     private suspend fun runBoundedRetentionLocked(nowUtcMillis: Long) {
         if (!maintenanceAllowed() || availableBytes() < SOFT_FREE_RESERVE_BYTES) return
         deleteInBatches {
@@ -761,7 +786,7 @@ class EpgRepository(
     }.getOrDefault(0L)
 
     private fun checkpointIfWalLarge() {
-        if (walFile.length() < WAL_CHECKPOINT_BYTES) return
+        if (walFile.length() < WAL_CHECKPOINT_BYTES || !hasCheckpointHeadroom()) return
         runCatching { checkpoint("PASSIVE") }
             .onFailure { Log.w(TAG, "Passive WAL checkpoint failed", it) }
     }
@@ -770,11 +795,20 @@ class EpgRepository(
         if (
             walFile.length() < WAL_CHECKPOINT_BYTES ||
             !maintenanceAllowed() ||
-            availableBytes() < SOFT_FREE_RESERVE_BYTES
+            !hasCheckpointHeadroom()
         ) return
         runCatching { checkpoint("TRUNCATE") }
             .onFailure { Log.w(TAG, "Idle WAL truncation failed", it) }
     }
+
+    private fun hasCheckpointHeadroom(): Boolean = runCatching {
+        val db = database.openHelper.readableDatabase
+        fun scalar(sql: String) = db.query(sql).use { if (it.moveToFirst()) it.getLong(0) else -1L }
+        val pages = scalar("PRAGMA page_count")
+        val size = scalar("PRAGMA page_size")
+        if (pages < 0 || size <= 0 || pages > Long.MAX_VALUE / size) false
+        else GuideRecoveryMaintenancePolicy.mayCheckpoint(availableBytes(), pages * size, databaseFile.length())
+    }.getOrDefault(false)
 
     private fun checkpoint(mode: String) {
         database.openHelper.writableDatabase

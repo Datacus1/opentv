@@ -21,11 +21,15 @@ import kotlinx.serialization.json.Json
 /** Read-only, ADB/system DUMP-protected diagnostics; not an HTTP or public-app API. */
 class GuideAuditReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != ACTION) return
+        if (intent.action != ACTION && intent.action != STORAGE_ACTION) return
         val pending = goAsync()
         scope.launch {
             try {
                 val result = withTimeout(8_000) { mutex.withLock {
+                    if (intent.action == STORAGE_ACTION) {
+                        return@withLock Json.encodeToString(GuideStorageInspector.inspect(context,
+                            ServiceLocator.get(context).database, System.currentTimeMillis()))
+                    }
                     val requested = intent.getStringExtra("snapshot")
                     if (requested == null) {
                         rows = ServiceLocator.get(context).epgRepository.auditChannels(System.currentTimeMillis())
@@ -53,6 +57,7 @@ class GuideAuditReceiver : BroadcastReceiver() {
     @Serializable private data class Reply(val snapshot: String, val page: GuideCoveragePage)
     companion object {
         const val ACTION = "app.opentv.GUIDE_AUDIT"
+        const val STORAGE_ACTION = "app.opentv.STORAGE_AUDIT"
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         private val mutex = Mutex()
         private var token = ""

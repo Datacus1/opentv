@@ -141,6 +141,50 @@ class EpgGuideRecoveryIntegrationTest {
         idle = false
         assertTrue(repo().maintainCache(now)); assertEquals(2, db.programmes().countAll()); assertEquals(0, requests)
     }
+    @Test fun `below download reserve idle retirement is bounded without feed writes or HTTP`() = runBlocking {
+        db.programmes().upsertAll((0 until 650).map { p("expired", now - 3 * 86_400_000L + it * 1000L) })
+        blocks(300_000) // 1.144 GiB: above hard + 32 MiB, below download reserve.
+        val before = db.epgFeeds().all()
+        val r = repo()
+        assertFalse(r.maintainCache(now)); assertEquals(251, db.programmes().countAll())
+        assertFalse(r.maintainCache(now)); assertEquals(1, db.programmes().countAll())
+        assertEquals(before, db.epgFeeds().all()); assertEquals(0, requests)
+        assertEquals("Cached", db.programmes().upcoming("known", now, 1).single().title)
+        assertTrue(r.health.value.storageBlocked)
+    }
+    @Test fun `insufficient recovery headroom or active playback leaves expired rows intact`() = runBlocking {
+        db.programmes().upsertAll(listOf(p("expired", now - 3 * 86_400_000L)))
+        for (n in listOf(262_144, 290_000)) {
+            blocks(n); assertFalse(repo().maintainCache(now)); assertEquals(2, db.programmes().countAll())
+        }
+        blocks(300_000); idle = false
+        assertFalse(repo().maintainCache(now)); assertEquals(2, db.programmes().countAll())
+    }
+    @Test fun `falling reserve stops recovery before the next batch`() = runBlocking {
+        db.programmes().upsertAll((0 until 650).map { p("expired", now - 3 * 86_400_000L + it * 1000L) })
+        blocks(300_000); var checks = 0
+        repo(allowed = { if (++checks == 3) blocks(262_144); true }).maintainCache(now)
+        assertEquals(551, db.programmes().countAll()); assertEquals(0, requests)
+    }
+    @Test fun `low reserve refresh retires expired rows but retains current data and metadata`() = runBlocking {
+        db.programmes().upsertAll(listOf(p("expired", now - 3 * 86_400_000L)))
+        blocks(300_000); val before = db.epgFeeds().all()
+        assertTrue(repo().syncAll(now, true).storageDeferred)
+        assertEquals(1, db.programmes().countAll()); assertEquals(before, db.epgFeeds().all())
+        assertEquals(0, requests)
+    }
+    @Test fun `rolling month of same key replacements and expiry stays bounded`() = runBlocking {
+        val r = repo()
+        repeat(30) { day ->
+            val clock = now + day * 86_400_000L
+            val rows = (0 until 24).map { p("rolling", clock + it * 3_600_000L) }
+            db.programmes().upsertAll(rows)
+            db.programmes().upsertAll(rows.map { it.copy(title = "Corrected") })
+            assertTrue(r.maintainCache(clock))
+            assertTrue(db.programmes().countAll() <= 49)
+        }
+        assertEquals(0, requests)
+    }
     @Test fun `starting playback during cleanup stops at a bounded batch`() = runBlocking {
         db.programmes().upsertAll((0 until 1500).map { p("expired", now - 3 * 86_400_000L + it * 1000L) })
         var checks = 0
