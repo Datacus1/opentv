@@ -11,14 +11,16 @@ import kotlin.coroutines.coroutineContext
 
 /** Explicit supplied-stream dry run. No HTTP, database, filesystem, scheduler or app entry point. */
 internal object GuideFeedDiagnostic {
-    @Serializable enum class Completion { COMPLETE, BYTE_LIMIT, IDENTITY_LIMIT, PROGRAMME_LIMIT, TIME_LIMIT, PARSE_ERROR, CANCELLED }
+    @Serializable enum class Completion { COMPLETE, BYTE_LIMIT, RECORD_LIMIT, IDENTITY_LIMIT, PROGRAMME_LIMIT, TIME_LIMIT, PARSE_ERROR, CANCELLED }
     data class Limits(val bytes: Long = 128L * 1024 * 1024, val identities: Int = 40_000,
         val programmes: Int = 1_000_000, val millis: Long = 30_000,
-        val selectedRows: Int = 200_000 / 3, val selectorChannels: Int = 20_000) {
+        val selectedRows: Int = 200_000 / 3, val selectorChannels: Int = 20_000,
+        val recordBytes: Long? = null) {
         init {
             require(bytes in 1..(256L * 1024 * 1024) && identities in 1..40_000)
             require(programmes in 1..1_000_000 && millis in 1..60_000)
             require(selectedRows in 1..200_000 && selectorChannels in 1..20_000)
+            require(recordBytes == null || recordBytes in 1..(1024L * 1024))
         }
     }
     @Serializable data class Row(val guideId: String, val fingerprint: String,
@@ -31,7 +33,7 @@ internal object GuideFeedDiagnostic {
         val productionIdentityCollision: Boolean)
     @Serializable data class Report(val feedId: Long, val nowMillis: Long, val completion: Completion,
         val bytesRead: Long, val encountered: Int, val selectorTruncated: Boolean,
-        val rows: List<Row>,
+        val rows: List<Row>, val streamFingerprint: String,
         val evidence: String = "One supplied stream; no writes or two-pass consistency proof. Partial scans cannot establish absence.")
     private data class Counts(val id: String, val fingerprint: String, val productionFingerprint: String,
         val lossy: Boolean, val truncated: Boolean, var alias: Boolean = false,
@@ -55,6 +57,8 @@ internal object GuideFeedDiagnostic {
         val context = coroutineContext
         val started = clockNanos()
         var bytes = 0L
+        var progressBytes = 0L
+        val digest = MessageDigest.getInstance("SHA-256")
         var encountered = 0
         var readFailure: Exception? = null
         val counts = LinkedHashMap<String, Counts>()
@@ -84,7 +88,8 @@ internal object GuideFeedDiagnostic {
                     c.alias, c.encountered, c.accepted, c.blank, c.missing, c.invalid, c.span, c.defaulted,
                     c.missingStop, c.invalidStop,
                     c.current, c.future, c.past, c.outside, c.offered,
-                    selections[c.productionFingerprint] ?: 0, (collisions[c.productionFingerprint] ?: 0) > 1) })
+                    selections[c.productionFingerprint] ?: 0, (collisions[c.productionFingerprint] ?: 0) > 1) },
+                digest.digest().joinToString("") { "%02x".format(it) })
         }
         // Do not close the caller's stream. Bound delivered bytes; one look-ahead distinguishes EOF at the limit.
         val bounded = object : FilterInputStream(input) {
@@ -93,7 +98,9 @@ internal object GuideFeedDiagnostic {
                     check()
                     val value = `in`.read()
                     if (value >= 0 && bytes >= limits.bytes) throw Budget(Completion.BYTE_LIMIT)
-                    if (value >= 0) bytes++
+                    if (value >= 0 && limits.recordBytes?.let { bytes - progressBytes >= it } == true)
+                        throw Budget(Completion.RECORD_LIMIT)
+                    if (value >= 0) { bytes++; digest.update(value.toByte()) }
                     return value
                 } catch (failure: Exception) { readFailure = failure; throw failure }
             }
@@ -102,8 +109,10 @@ internal object GuideFeedDiagnostic {
                     check()
                     if (length == 0) return 0
                     if (bytes >= limits.bytes) return read().let { if (it < 0) -1 else error("Unreachable") }
-                    val n = `in`.read(buffer, offset, minOf(length.toLong(), limits.bytes - bytes).toInt())
-                    if (n > 0) bytes += n
+                    val recordRemaining = limits.recordBytes?.let { it - (bytes - progressBytes) } ?: Long.MAX_VALUE
+                    if (recordRemaining <= 0) return read().let { if (it < 0) -1 else error("Unreachable") }
+                    val n = `in`.read(buffer, offset, minOf(length.toLong(), limits.bytes - bytes, recordRemaining).toInt())
+                    if (n > 0) { bytes += n; digest.update(buffer, offset, n) }
                     return n
                 } catch (failure: Exception) { readFailure = failure; throw failure }
             }
@@ -111,9 +120,10 @@ internal object GuideFeedDiagnostic {
         val completion = try {
             requestedIds.forEach { check(); row(it) }
             XmltvParser.parseWithEvidence(bounded, feedId,
-                onChannelAlias = { id, _ -> check(); row(id).alias = true },
+                onChannelAlias = { id, _ -> check(); progressBytes = bytes; row(id).alias = true },
                 onEvidence = { e ->
                     check()
+                    progressBytes = bytes
                     if (encountered >= limits.programmes) throw Budget(Completion.PROGRAMME_LIMIT)
                     encountered++
                     val c = row(e.channelId)

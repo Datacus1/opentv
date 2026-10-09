@@ -44,6 +44,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
@@ -198,6 +199,75 @@ class EpgRepository(
         val context = currentCoroutineContext()
         GuideIdentityAudit.snapshot(snapshot.channels, snapshot.feeds, snapshot.aliases,
             snapshot.coverage) { context.ensureActive() }
+    }
+
+    /** Explicit exact-stream diagnostic only: no guide/cache/matcher/settings writes. */
+    internal suspend fun probeShortGuides(ids: List<Long>, now: Long,
+        onRow: (GuideShortProbeRow) -> Unit) = withContext(Dispatchers.IO) {
+        require(ids.size in 1..4 && ids.distinct().size == ids.size && ids.all { it > 0 })
+        val channels = channelDao.allForMatching().associateBy { it.id }
+        val feeds = feedDao.all()
+        val client = http.newBuilder().connectTimeout(3, TimeUnit.SECONDS)
+            .readTimeout(5, TimeUnit.SECONDS).callTimeout(10, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(false).build()
+        val probeApi = XtreamApi(client)
+        for (id in ids) {
+            currentCoroutineContext().ensureActive()
+            val channel = channels[id]
+            val source = channel?.let { sourceDao.byId(it.sourceId) }
+            val ownFeeds = if (source == null) emptyList() else feeds.filter {
+                it.enabled && !it.deleting && it.providerSourceId == source.id }
+            val result = if (channel == null || source == null || !source.enabled ||
+                source.kind != SourceKind.XTREAM || ownFeeds.isEmpty())
+                app.opentv.data.remote.ShortEpgProbeCounts(status = "UNAVAILABLE")
+            else probeApi.probeShortEpg(source, channel.streamId, now)
+            onRow(GuideShortProbeRow(id, channel?.sourceId,
+                GuideCoverageAudit.safeLabel(channel?.name.orEmpty()),
+                channel?.epgChannelId?.let(GuideCoverageAudit::safeLabel),
+                ownFeeds.maxOfOrNull { it.lastSyncMillis }, result))
+        }
+    }
+
+    /** One explicitly requested bulk dry-run. No writes, refresh, matcher, cache reclaim or retries. */
+    internal suspend fun probeGuideFeed(feedId: Long, now: Long): GuideFeedProbeEvidence = withContext(Dispatchers.IO) {
+        val (feeds, channels) = database.withTransaction { feedDao.all() to channelDao.allForMatching() }
+        val feed = feeds.single { it.id == feedId && it.enabled && !it.deleting }
+        val source = feed.providerSourceId?.let { sourceDao.byId(it) }
+        require(feed.providerSourceId == null || source?.let { it.enabled && it.kind == SourceKind.XTREAM } == true)
+        val client = http.newBuilder().connectTimeout(3, TimeUnit.SECONDS).readTimeout(8, TimeUnit.SECONDS)
+            .callTimeout(50, TimeUnit.SECONDS).retryOnConnectionFailure(false).build()
+        val call = if (source != null) XtreamApi(client).diagnosticEpgCall(source)
+            else client.newCall(Request.Builder().url(requireNotNull(feed.url)).build())
+        val requested = channels.filter { it.sourceId == feed.providerSourceId }
+            .mapNotNull { it.epgChannelId }.distinct().take(MAX_ALIASES_PER_FEED)
+        kotlinx.coroutines.coroutineScope {
+            // Cancellation closes the owned blocking HTTP call, including an in-flight body read.
+            val closer = launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                try { kotlinx.coroutines.awaitCancellation() } finally { call.cancel() }
+            }
+            try {
+                call.execute().use { response ->
+                    require(response.isSuccessful)
+                    val raw = requireNotNull(response.body).byteStream()
+                    val transport = GuideFeedTransportLimit(raw, 256L * 1024 * 1024)
+                    val buffered = BufferedInputStream(transport, 8192)
+                    buffered.mark(2); val a = buffered.read(); val b = buffered.read(); buffered.reset()
+                    val decoded = if (a == 0x1f && b == 0x8b) GZIPInputStream(buffered) else buffered
+                    decoded.use {
+                        val report = GuideFeedDiagnostic.scan(it, feed.id, now,
+                            GuideFeedDiagnostic.Limits(bytes = 256L * 1024 * 1024, millis = 45_000, recordBytes = 256 * 1024L,
+                                selectedRows = minOf(rowLimitPerFeed, rowLimitTotal / feeds.count { f -> f.enabled && !f.deleting }.coerceAtLeast(1))),
+                            requestedIds = requested)
+                        GuideFeedProbeEvidence(feed.id, feed.lastSyncMillis, now,
+                            transport.bytes, transport.limitReached, report)
+                    }
+                }
+            } catch (failure: Exception) {
+                // Closing a cancelled blocking read can surface IOException; retain coroutine cancellation.
+                currentCoroutineContext().ensureActive()
+                throw failure
+            } finally { closer.cancel(); call.cancel() }
+        }
     }
 
     private data class AuditSnapshot(

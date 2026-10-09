@@ -82,6 +82,15 @@
             </intent-filter>
         </receiver>
 
+        <receiver android:name=".data.repo.GuideShortProbeReceiver" android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter><action android:name="app.opentv.GUIDE_SHORT_PROBE" /></intent-filter>
+        </receiver>
+        <receiver android:name=".data.repo.GuideFeedProbeReceiver" android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter><action android:name="app.opentv.GUIDE_FEED_PROBE" /></intent-filter>
+        </receiver>
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

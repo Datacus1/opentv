@@ -82,7 +82,10 @@ object XmltvParser {
         parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
         // Request strict XML explicitly, plus verify the root below: EOF alone is
         // not completeness. Ordinary ingestion retains its existing setting.
-        if (onEvidence != null) parser.setFeature("http://xmlpull.org/v1/doc/features.html#relaxed", false)
+        if (onEvidence != null) {
+            parser.setFeature("http://xmlpull.org/v1/doc/features.html#relaxed", false)
+            parser.setFeature(XmlPullParser.FEATURE_PROCESS_DOCDECL, false)
+        }
         parser.setInput(input, null)
 
         var diagnosticRootSeen = false

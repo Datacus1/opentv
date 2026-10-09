@@ -25,6 +25,7 @@ import okhttp3.Protocol
 import okhttp3.Response
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.buffer
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
@@ -349,6 +350,72 @@ class EpgGuideRecoveryIntegrationTest {
             streamId = id.toString(), name = "FOX East", groupKey = "foxeast", qualityRank = 3 - id,
             categoryId = null, logoUrl = null, epgChannelId = "fox-east", number = null,
             streamUrl = "https://example.invalid/live") })
+    }
+    @Test fun `exact stream probe is bounded read only and retains cache aliases and user fields`() = runBlocking {
+        setupFox()
+        response = { """{"epg_listings":[{"title":"Private","start_timestamp":1800000000,"stop_timestamp":1800003600}]}""" }
+        val beforeChannels = db.channels().allForMatching()
+        val beforeFeeds = db.epgFeeds().all()
+        val beforeAliases = db.epgAliases().allForAudit()
+        val rows = mutableListOf<app.opentv.data.repo.GuideShortProbeRow>()
+        blocks(1) // Read-only diagnostic must not lower reserves or run recovery/deletion.
+        repo().probeShortGuides(listOf(1, 2, 999), now) { rows += it }
+        assertEquals(2, requests); assertEquals(3, rows.size)
+        assertEquals(listOf("COMPLETE", "COMPLETE", "UNAVAILABLE"), rows.map { it.counts.status })
+        assertEquals(1, rows.first().counts.current)
+        assertEquals(beforeChannels, db.channels().allForMatching())
+        assertEquals(beforeFeeds, db.epgFeeds().all())
+        assertEquals(beforeAliases, db.epgAliases().allForAudit())
+        assertEquals(1, db.programmes().countAll())
+        for (ids in listOf(emptyList(), listOf(1L, 1L), listOf(-1L), (1L..5L).toList())) {
+            try { repo().probeShortGuides(ids, now) {}; fail("invalid request accepted") }
+            catch (_: IllegalArgumentException) { }
+        }
+        assertEquals(2, requests)
+    }
+    @Test fun `bulk diagnostic uses production row selector without any cache writes`() = runBlocking {
+        setupFox()
+        response = { xml(listOf(p("known", now), p("raw-only", now))) }
+        val beforeChannels = db.channels().allForMatching()
+        val beforeFeeds = db.epgFeeds().all()
+        val beforeAliases = db.epgAliases().allForAudit()
+        val result = repo().probeGuideFeed(1, now)
+        assertEquals(app.opentv.data.repo.GuideFeedDiagnostic.Completion.COMPLETE, result.report.completion)
+        assertEquals(2, result.report.encountered)
+        assertEquals(0, result.report.rows.single { it.guideId == "fox-east" }.encountered)
+        assertEquals(1, requests)
+        assertEquals(beforeChannels, db.channels().allForMatching()); assertEquals(beforeFeeds, db.epgFeeds().all())
+        assertEquals(beforeAliases, db.epgAliases().allForAudit()); assertEquals(1, db.programmes().countAll())
+    }
+    @Test fun `bulk diagnostic cancellation closes a blocked body through owned call watchdog`() = runBlocking {
+        setupFox()
+        val entered = CountDownLatch(1); val closed = CountDownLatch(1)
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            val stream = object : okio.Source {
+                override fun timeout() = okio.Timeout.NONE
+                override fun close() { closed.countDown() }
+                override fun read(sink: okio.Buffer, byteCount: Long): Long {
+                    entered.countDown()
+                    while (!chain.call().isCanceled()) Thread.sleep(5)
+                    throw java.io.IOException("Synthetic cancelled body")
+                }
+            }
+            val body = object : okhttp3.ResponseBody() {
+                private val buffered = stream.buffer()
+                override fun contentType(): okhttp3.MediaType? = null
+                override fun contentLength() = -1L
+                override fun source() = buffered
+            }
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK").body(body).build()
+        }.build()
+        val r = EpgRepository(context, db, db.programmes(), db.epgFeeds(), db.epgAliases(), db.channels(),
+            db.sources(), XtreamApi(client), client)
+        val scan = async(Dispatchers.IO) { r.probeGuideFeed(1, now) }
+        assertTrue(entered.await(5, TimeUnit.SECONDS))
+        scan.cancel()
+        scan.join()
+        assertTrue(closed.await(2, TimeUnit.SECONDS))
+        assertEquals(1, db.programmes().countAll())
     }
     @Test fun `successful second short guide variant does not leave a false failure warning`() = runBlocking {
         setupFox(); var shortRequests = 0

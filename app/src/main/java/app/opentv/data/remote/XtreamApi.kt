@@ -142,6 +142,44 @@ class XtreamApi(
         parseShortEpg(body)
     }
 
+    /** Explicit read-only diagnostic. Response size is enforced, not trusted to the panel's limit. */
+    internal suspend fun probeShortEpg(source: Source, streamId: String, now: Long): ShortEpgProbeCounts {
+        val url = baseUrl(source).newBuilder().encodedPath("/player_api.php")
+            .addQueryParameter("username", source.username.orEmpty())
+            .addQueryParameter("password", source.password.orEmpty())
+            .addQueryParameter("action", "get_short_epg")
+            .addQueryParameter("stream_id", streamId).addQueryParameter("limit", "20").build()
+        val call = http.newCall(request(source, url))
+        return kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : okhttp3.Callback {
+                override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                    if (continuation.isActive) continuation.resumeWith(Result.success(
+                        ShortEpgProbeCounts(status = "NETWORK_ERROR")))
+                }
+                override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                    val result = try {
+                        response.use {
+                            if (!it.isSuccessful) ShortEpgProbeCounts(status = "HTTP_ERROR")
+                            else {
+                                val body = it.body ?: throw java.io.IOException()
+                                val buffer = okio.Buffer()
+                                while (buffer.size <= SHORT_PROBE_MAX_BYTES) {
+                                    val read = body.source().read(buffer,
+                                        minOf(8192L, SHORT_PROBE_MAX_BYTES + 1 - buffer.size))
+                                    if (read < 0) break
+                                }
+                                if (buffer.size > SHORT_PROBE_MAX_BYTES) ShortEpgProbeCounts(status = "BYTE_LIMIT")
+                                else analyseShortEpgProbe(buffer.readUtf8(), now)
+                            }
+                        }
+                    } catch (_: Exception) { ShortEpgProbeCounts(status = "NETWORK_ERROR") }
+                    if (continuation.isActive) continuation.resumeWith(Result.success(result))
+                }
+            })
+        }
+    }
+
     suspend fun movies(source: Source): List<Movie> = withContext(Dispatchers.IO) {
         getJson(source, "get_vod_streams").arrayOrEmpty.mapNotNull { element ->
             val obj = element.jsonObjectOrNull ?: return@mapNotNull null
@@ -293,6 +331,9 @@ class XtreamApi(
     }
 
     /** Opens the XMLTV guide as a stream. The caller must close it. */
+    internal fun diagnosticEpgCall(source: Source): okhttp3.Call =
+        http.newCall(request(source, source.epgUrl?.toHttpUrlOrNull() ?: xmltvUrl(source)))
+
     suspend fun openEpgStream(source: Source): InputStream = withContext(Dispatchers.IO) {
         val url = source.epgUrl?.toHttpUrlOrNull() ?: xmltvUrl(source)
         val response = http.newCall(request(source, url)).execute()

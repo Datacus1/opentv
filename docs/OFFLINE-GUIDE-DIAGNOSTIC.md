@@ -2,8 +2,9 @@
 
 This is a PC-only, explicitly invoked supplied-file diagnostic, not a provider
 fetcher or a schedule fix. It never starts an app, calls ADB, opens HTTP, writes
-the guide database, stages another feed copy or changes matching. The installed
-Shield .46 remains unchanged. No diagnostic APK is produced by the runner.
+the guide database, stages another feed copy or changes matching. No diagnostic
+APK is produced by this runner. For later, separately authorized device diagnostics,
+see [LIVE-GUIDE-DIAGNOSTIC.md](LIVE-GUIDE-DIAGNOSTIC.md); the runbook tracks installed state.
 
 ## Run on a local XMLTV file
 
@@ -59,7 +60,7 @@ external fixture contents are not ordinary task cache keys.
   ordinary ingestion; ordinary timestamp/row acceptance and EOF behavior remain
   unchanged. This is NOT a production parser hardening fix.
 - COMPLETE with selectorTruncated=true means parsing finished but selection lost
-  information. BYTE/IDENTITY/PROGRAMME/TIME_LIMIT and PARSE_ERROR are partial;
+information. BYTE/RECORD/IDENTITY/PROGRAMME/TIME_LIMIT and PARSE_ERROR are partial;
   partial zeros must never be described as absent upstream. Cancellation supplies
   a partial CANCELLED callback and still propagates cancellation to the caller.
 - This is one pass through one supplied file, NOT a replay of two changing HTTP
@@ -77,13 +78,13 @@ separate review of transport timeouts, text-node memory and background lifecycle
 
 ## Imported coverage visibility
 
-The uninstalled source also extends protected immutable identity snapshots with
+Source since the .47 diagnostic build extends protected immutable identity snapshots with
 an opt-in `coverage` page: feed-qualified programme IDs/counts independent of
 aliases, exact fingerprints, hasAlias, label loss and source/enable provenance.
 Export is capped at20,000 coverage identities with original total and explicit
 coverageComplete. The existing ADB script's `-IncludeCoverage` requires that
-future source build and is NOT part of this offline runner. Installed .46 cannot
-export those new pages. No device command is needed for synthetic tests here.
+newer source build and is NOT part of this offline runner. Older .46 cannot
+export those pages; .47 and later can. No device command is needed for synthetic tests here.
 The existing120s immutable snapshot lifetime can expire during a very large export;
 such collection fails rather than representing partial metadata as complete.
 
@@ -91,7 +92,7 @@ This closes an observability blind spot only. Missing WIAT/WTTO listings still
 require actual provider evidence; synthetic diagnostic success does not establish
 their root cause. Obtain fresh user readiness before any later device update.
 
-## Offline validation and review, October9
+## Historical offline validation and review, earlier October9
 
 Full debug/release:590 discovered,586 passed,4 opt-in skips,zero failures/errors;
 release-critical lint passed. All6,581 saved identities replay unchanged:

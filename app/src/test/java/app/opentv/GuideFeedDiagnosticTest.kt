@@ -26,6 +26,39 @@ class GuideFeedDiagnosticTest {
     private suspend fun scan(body: String, limits: D.Limits = D.Limits(), ids: List<String> = emptyList()) =
         D.scan("<tv>$body</tv>".byteInputStream(), 6, now, limits, ids)
 
+    @Test fun `network record guard stops giant materialized nodes and preserves small production rows`() = runTest {
+        val large = "<programme channel=\"a\" start=\"20261009173000 +0000\"><desc>" + "x".repeat(300_000) + "</desc></programme>"
+        val partial = scan(large, D.Limits(recordBytes = 256 * 1024L))
+        assertEquals(D.Completion.RECORD_LIMIT, partial.completion)
+        assertTrue(partial.bytesRead <= 256 * 1024L)
+        assertEquals(0, partial.encountered)
+        val small = scan(programme("a") + programme("b"), D.Limits(recordBytes = 256 * 1024L))
+        assertEquals(D.Completion.COMPLETE, small.completion)
+        assertEquals(2, small.encountered)
+        assertEquals(64, small.streamFingerprint.length)
+    }
+    @Test fun `diagnostic custom entity cannot expand a small input into an unbounded body`() = runTest {
+        val xml = """<!DOCTYPE tv [<!ENTITY a "Private">]><tv><programme channel="a" start="20261009173000 +0000"><desc>&a;</desc></programme></tv>"""
+        assertEquals(D.Completion.PARSE_ERROR, D.scan(xml.byteInputStream(), 6, now, D.Limits(recordBytes = 1024)).completion)
+    }
+    @Test fun `record bound also covers header alias unknown elements and gzip inflation`() = runTest {
+        val huge = "x".repeat(300_000)
+        for (body in listOf("<unknown>$huge</unknown>", "<channel id=\"a\"><display-name>$huge</display-name></channel>", huge)) {
+            assertEquals(D.Completion.RECORD_LIMIT, scan(body, D.Limits(recordBytes = 256 * 1024L)).completion)
+        }
+        val compressed = java.io.ByteArrayOutputStream()
+        java.util.zip.GZIPOutputStream(compressed).use { it.write("<tv><unknown>$huge</unknown></tv>".toByteArray()) }
+        val transport = app.opentv.data.repo.GuideFeedTransportLimit(compressed.toByteArray().inputStream())
+        val inflated = D.scan(java.util.zip.GZIPInputStream(transport), 6, now, D.Limits(recordBytes = 256 * 1024L))
+        assertEquals(D.Completion.RECORD_LIMIT, inflated.completion)
+        assertFalse(transport.limitReached)
+        val exact = app.opentv.data.repo.GuideFeedTransportLimit("abc".byteInputStream(), 3)
+        assertEquals("abc", exact.readBytes().toString(Charsets.UTF_8)); assertFalse(exact.limitReached)
+        val limited = app.opentv.data.repo.GuideFeedTransportLimit("abcd".byteInputStream(), 3)
+        try { limited.readBytes(); fail("transport cap ignored") } catch (_: java.io.IOException) { }
+        assertTrue(limited.limitReached); assertEquals(3L, limited.bytes)
+    }
+
     @Test fun `exact raw IDs preserve case and spacing without inventing missing listings`() = runTest {
         val r = scan("<channel id=\"CBSWIAT.us\"/>" + programme("cbswiat.us") + programme("CBSWIAT.us "),
             ids = listOf("CBSWIAT.us", "CWWTTO.us"))
