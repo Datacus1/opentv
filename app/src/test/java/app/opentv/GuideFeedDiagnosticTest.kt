@@ -58,6 +58,23 @@ class GuideFeedDiagnosticTest {
         try { limited.readBytes(); fail("transport cap ignored") } catch (_: java.io.IOException) { }
         assertTrue(limited.limitReached); assertEquals(3L, limited.bytes)
     }
+    @Test fun `last exact identity cache and grouped selection hashing preserve every report counter`() = runTest {
+        val ids = listOf("a", "A", "a ", "b".repeat(512) + "1", "b".repeat(512) + "2")
+        // Order/grouping changes the stream digest, not per-ID identity/count/selection decisions.
+        val grouped = ids.flatMap { id -> List(40) { programme(id) } }.joinToString("")
+        val interleaved = (0 until 40).flatMap { ids.map { programme(it) } }.joinToString("")
+        val first = scan(grouped, ids = ids + "missing")
+        val second = scan(interleaved, ids = ids + "missing")
+        assertEquals(D.Completion.COMPLETE, first.completion); assertEquals(D.Completion.COMPLETE, second.completion)
+        assertEquals(first.rows.sortedBy { it.fingerprint }, second.rows.sortedBy { it.fingerprint })
+        assertEquals(first.encountered, second.encountered); assertEquals(first.selectorTruncated, second.selectorTruncated)
+        assertTrue(first.streamFingerprint != second.streamFingerprint)
+        assertEquals(200, first.rows.sumOf { it.encountered })
+        assertEquals(0, first.rows.single { it.guideId == "missing" }.encountered)
+        val repeated = D.scan("<tv>$grouped</tv>".byteInputStream(), 6, now,
+            requestedIds = ids + "missing", clockNanos = { 0L })
+        assertEquals(first, repeated)
+    }
 
     @Test fun `exact raw IDs preserve case and spacing without inventing missing listings`() = runTest {
         val r = scan("<channel id=\"CBSWIAT.us\"/>" + programme("cbswiat.us") + programme("CBSWIAT.us "),

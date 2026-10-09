@@ -55,6 +55,10 @@ Limits:256MiB delivered transport stream (after any OkHttp content decoding),
 1,000,000 programmes and production fair-share selector<=200,000 keys/20,000 channels.
 .49 initially had64MiB transport/128MiB XML; its partial response hit the transport
 cap. Increasing streamed bytes in .50 does not increase stored guide/cache caps.
+.51 reduces diagnostic-only hashing: one operation-local last exact-ID entry
+for IDs<=512 characters (long IDs bypass it, never truncate the key), and one hash
+per selected production channel group with summed hash counts. No budget, parsing,
+matching, digest, row/window counter, cache or cancellation policy is relaxed.
 
 The diagnostic-only256KiB delivered-byte interval between completed channel/
 programme callbacks bounds giant XML text/attributes/unknown sections, plus reader

@@ -62,6 +62,10 @@ internal object GuideFeedDiagnostic {
         var encountered = 0
         var readFailure: Exception? = null
         val counts = LinkedHashMap<String, Counts>()
+        // XMLTV normally groups programmes by channel. Reuse only the immediately previous
+        // exact ID; never accumulate another raw-ID cache or change case/spacing decisions.
+        var lastId: String? = null
+        var lastCounts: Counts? = null
         val oldest = now - EpgRepository.RETENTION_PAST_MILLIS
         val newest = now + EpgRepository.RETENTION_FUTURE_MILLIS
         val selector = GuideProgrammeSelector(now, oldest, newest, limits.selectedRows, limits.selectorChannels)
@@ -71,17 +75,27 @@ internal object GuideFeedDiagnostic {
         }
         fun row(raw: String?): Counts {
             val id = raw.orEmpty()
+            if (id == lastId) return lastCounts!!
             val hash = fingerprint(id)
-            return counts[hash] ?: run {
+            val result = counts[hash] ?: run {
                 if (counts.size >= limits.identities) throw Budget(Completion.IDENTITY_LIMIT)
                 val safe = GuideCoverageAudit.safeLabel(id)
                 Counts(safe, hash, fingerprint(id.take(EpgRepository.MAX_EPG_ID_CHARS)), safe != id,
                     id.length > EpgRepository.MAX_EPG_ID_CHARS).also { counts[hash] = it }
             }
+            // Unusually large raw IDs still use their full hash; do not retain/truncate a cache key.
+            if (id.length <= EpgRepository.MAX_EPG_ID_CHARS) { lastId = id; lastCounts = result }
+            else { lastId = null; lastCounts = null }
+            return result
         }
         fun report(completion: Completion): Report {
             val selected = selector.selected()
-            val selections = selected.groupingBy { fingerprint(it.channel) }.eachCount()
+            val selections = HashMap<String, Int>()
+            // Hash once per channel, not once per selected programme key. Preserve hash-group sums.
+            selected.groupingBy { it.channel }.eachCount().forEach { (channel, n) ->
+                val hash = fingerprint(channel)
+                selections[hash] = (selections[hash] ?: 0) + n
+            }
             val collisions = counts.values.groupingBy { it.productionFingerprint }.eachCount()
             return Report(feedId, now, completion, bytes, encountered, selector.truncated(selected),
                 counts.values.map { c -> Row(c.id, c.fingerprint, c.productionFingerprint, c.lossy, c.truncated,
