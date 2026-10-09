@@ -9,6 +9,43 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class GuideIdentityAuditTest {
+    @Test fun `coverage-only identities are retained with feed and exact identity provenance`() {
+        val feeds = listOf(EpgFeed(id = 6, name = "Private", providerSourceId = 1),
+            EpgFeed(id = 7, name = "Disabled", enabled = false))
+        val aliases = listOf(EpgChannelAlias(6, "CBSWIAT.us", "WIAT", "unused"))
+        val rows = listOf(GuideCoverageRow(6, "cbswiat.us", 3, 1, 2, 100, 50),
+            GuideCoverageRow(6, "CBSWIAT.us ", 2, 1, 1, 100, 50),
+            GuideCoverageRow(7, "CBSWIAT.us", 4, 1, 3, 100, 50))
+        val snapshot = GuideIdentityAudit.snapshot(emptyList(), feeds, aliases, rows)
+        val page = snapshot.page("coverage", 0, 100)
+        assertEquals(3, page.coverage.size)
+        assertTrue(page.coverage.none { it.hasAlias })
+        assertEquals(3, page.coverage.map { it.fingerprint }.distinct().size)
+        assertEquals(0, snapshot.aliases.single().totalRows)
+        assertTrue(page.coverageComplete)
+        assertEquals(3, page.coverageIdentitiesTotal)
+        assertFalse(page.coverage.single { it.feedId == 7L }.enabled)
+    }
+    @Test fun `coverage export cap and lossy labels never masquerade as complete identities`() {
+        val rows = (0..GuideIdentityAudit.MAX_COVERAGE_IDENTITIES).map {
+            GuideCoverageRow(6, if (it == 0) "https://private/user/password" else "a".repeat(160) + it,
+                1, 1, 0, 100, null)
+        }
+        val snapshot = GuideIdentityAudit.snapshot(emptyList(), emptyList(), emptyList(), rows)
+        assertFalse(snapshot.coverageComplete)
+        assertEquals(rows.size, snapshot.coverageIdentitiesTotal)
+        assertEquals(GuideIdentityAudit.MAX_COVERAGE_IDENTITIES, snapshot.coverage.size)
+        assertEquals(snapshot.coverage.size, snapshot.coverage.map { it.fingerprint }.distinct().size)
+        assertTrue(snapshot.coverage.all { it.lossyLabel })
+        val json = Json.encodeToString(snapshot.page("coverage", 0, 100))
+        assertFalse(json.contains("private"))
+        assertFalse(json.contains("password"))
+        val uri = GuideIdentityAudit.snapshot(emptyList(), emptyList(), emptyList(), listOf(rows.first()))
+        val uriJson = Json.encodeToString(uri.page("coverage", 0, 100))
+        assertTrue(uri.coverage.single().lossyLabel)
+        assertFalse(uriJson.contains("private"))
+        assertFalse(uriJson.contains("password"))
+    }
     @Test fun `identity evidence excludes credentials and bounds pages`() {
         val channel = Channel(id = 1, sourceId = 7, streamId = "secret-stream-id",
             name = "[CA] CNN https://private/user/password", categoryId = "secret-category",

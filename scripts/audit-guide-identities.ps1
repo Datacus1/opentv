@@ -1,7 +1,8 @@
 param(
     [string]$Adb = (Join-Path $PSScriptRoot '../../tools/platform-tools/adb.exe'),
     [string]$Device = '192.168.1.186:5555',
-    [Parameter(Mandatory=$true)][string]$OutputPath
+    [Parameter(Mandatory=$true)][string]$OutputPath,
+    [switch]$IncludeCoverage
 )
 $ErrorActionPreference = 'Stop'
 function Read-Page([string]$Token, [string]$Kind, [int]$Offset) {
@@ -23,7 +24,9 @@ function Read-Page([string]$Token, [string]$Kind, [int]$Offset) {
 }
 $token = ''
 $result = [ordered]@{ capturedUtc = [DateTime]::UtcNow.ToString('o') }
-foreach ($kind in @('channels', 'aliases')) {
+$kinds = @('channels', 'aliases')
+if ($IncludeCoverage) { $kinds += 'coverage' } # Requires the newer diagnostic build; never runs automatically.
+foreach ($kind in $kinds) {
     $first = Read-Page $token $kind 0
     if (-not $token) { $token = $first.snapshot }
     $total = $first.page.total
@@ -39,11 +42,23 @@ foreach ($kind in @('channels', 'aliases')) {
         @($rows.channelId | Sort-Object -Unique).Count
     } else {
         $identityKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-        foreach ($row in $rows) { [void]$identityKeys.Add("$($row.feedId):$($row.guideId)") }
+        foreach ($row in $rows) {
+            $id = if ($kind -eq 'coverage') { $row.fingerprint } else { $row.guideId }
+            if ([string]::IsNullOrWhiteSpace($id)) { throw 'Missing diagnostic identity.' }
+            [void]$identityKeys.Add("$($row.feedId):$id")
+        }
         $identityKeys.Count
     }
     if ($rows.Count -ne $total -or $unique -ne $total) { throw 'Duplicate or incomplete identity audit.' }
     $result[$kind] = $rows.ToArray()
+    if ($kind -eq 'coverage') {
+        # Kotlin omits default=true on complete snapshots. Old builds reject the new kind.
+        $complete = if ($first.page.PSObject.Properties['coverageComplete']) { [bool]$first.page.coverageComplete } else { $true }
+        $available = if ($first.page.PSObject.Properties['coverageIdentitiesTotal']) { [int]$first.page.coverageIdentitiesTotal } else { 0 }
+        if (($complete -and $available -ne $total) -or $available -lt $total) { throw 'Invalid coverage completeness metadata.' }
+        $result.coverageComplete = $complete
+        $result.coverageIdentitiesTotal = $available
+    }
     "Read $total $kind from one immutable identity snapshot."
 }
 $parent = Split-Path -Parent $OutputPath

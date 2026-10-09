@@ -3,4 +3,9 @@ def outputRoot = System.getenv('OPENTV_OFFLINE_BUILD_DIR')
 if (!outputRoot) throw new GradleException('Set OPENTV_OFFLINE_BUILD_DIR to an empty local build-output directory.')
 gradle.beforeProject { project ->
     project.layout.buildDirectory.set(new File(outputRoot, project.path == ':' ? 'root' : project.path.substring(1).replace(':', '/')))
+    def localAndroid = System.getenv('OPENTV_ROBOLECTRIC_DEPENDENCY_DIR')
+    if (localAndroid) project.tasks.withType(org.gradle.api.tasks.testing.Test).configureEach {
+        systemProperty 'robolectric.offline', 'true'
+        systemProperty 'robolectric.dependency.dir', localAndroid
+    }
 }

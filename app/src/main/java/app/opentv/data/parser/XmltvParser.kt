@@ -31,6 +31,11 @@ import org.xmlpull.v1.XmlPullParser
  */
 object XmltvParser {
 
+    /** Diagnostic-only metadata; never titles, descriptions, URLs or timestamp strings. */
+    internal enum class Rejection { BLANK_CHANNEL, MISSING_START, INVALID_START, NONPOSITIVE_SPAN }
+    internal data class Evidence(val channelId: String?, val start: Long?, val end: Long?,
+        val rejection: Rejection?, val defaultedStop: Boolean, val invalidStop: Boolean)
+
     /** Result of a parse run, for logging and for surfacing honest errors to the user. */
     data class Stats(
         val channelCount: Int,
@@ -56,6 +61,18 @@ object XmltvParser {
         feedId: Long,
         onChannelAlias: (id: String, displayName: String?) -> Unit = { _, _ -> },
         onProgramme: suspend (Programme) -> Unit,
+    ): Stats = parseInternal(input, feedId, onChannelAlias, null, onProgramme)
+
+    /** No production caller opts in. Same row/time rules; requires a complete XMLTV document. */
+    internal suspend fun parseWithEvidence(input: InputStream, feedId: Long,
+        onChannelAlias: (String, String?) -> Unit,
+        onEvidence: (Evidence) -> Unit,
+        onProgramme: suspend (Programme) -> Unit,
+    ): Stats = parseInternal(input, feedId, onChannelAlias, onEvidence, onProgramme)
+
+    private suspend fun parseInternal(input: InputStream, feedId: Long,
+        onChannelAlias: (String, String?) -> Unit, onEvidence: ((Evidence) -> Unit)?,
+        onProgramme: suspend (Programme) -> Unit,
     ): Stats {
         var channelCount = 0
         var programmeCount = 0
@@ -63,15 +80,34 @@ object XmltvParser {
 
         val parser = Xml.newPullParser()
         parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
+        // Request strict XML explicitly, plus verify the root below: EOF alone is
+        // not completeness. Ordinary ingestion retains its existing setting.
+        if (onEvidence != null) parser.setFeature("http://xmlpull.org/v1/doc/features.html#relaxed", false)
         parser.setInput(input, null)
 
+        var diagnosticRootSeen = false
+        var diagnosticRootClosed = false
         var event = parser.eventType
         while (event != XmlPullParser.END_DOCUMENT) {
+            if (onEvidence != null) {
+                if (event == XmlPullParser.START_TAG && parser.depth == 1) {
+                    if (diagnosticRootSeen || parser.name != "tv") {
+                        throw org.xmlpull.v1.XmlPullParserException("Diagnostic requires an XMLTV root")
+                    }
+                    diagnosticRootSeen = true
+                }
+                if (event == XmlPullParser.END_TAG && parser.depth == 1 && parser.name == "tv") {
+                    diagnosticRootClosed = true
+                }
+                if (event == XmlPullParser.TEXT && parser.depth == 0 && !parser.text.isNullOrBlank()) {
+                    throw org.xmlpull.v1.XmlPullParserException("Diagnostic requires one XMLTV document")
+                }
+            }
             if (event == XmlPullParser.START_TAG) {
                 when (parser.name) {
                     "channel" -> {
                         val id = parser.getAttributeValue(null, "id")
-                        val displayName = readChannelDisplayName(parser)
+                        val displayName = readChannelDisplayName(parser, onEvidence != null)
                         if (!id.isNullOrBlank()) {
                             channelCount++
                             onChannelAlias(id, displayName)
@@ -79,7 +115,7 @@ object XmltvParser {
                     }
 
                     "programme" -> {
-                        val programme = readProgramme(parser, feedId)
+                        val programme = readProgramme(parser, feedId, onEvidence)
                         if (programme != null) {
                             programmeCount++
                             onProgramme(programme)
@@ -92,10 +128,14 @@ object XmltvParser {
             event = parser.next()
         }
 
+        if (onEvidence != null && (!diagnosticRootSeen || !diagnosticRootClosed)) {
+            throw org.xmlpull.v1.XmlPullParserException("Diagnostic XMLTV document is incomplete")
+        }
+
         return Stats(channelCount, programmeCount, skipped)
     }
 
-    private fun readChannelDisplayName(parser: XmlPullParser): String? {
+    private fun readChannelDisplayName(parser: XmlPullParser, diagnostic: Boolean): String? {
         var displayName: String? = null
         var depth = 1
         while (depth > 0) {
@@ -108,16 +148,21 @@ object XmltvParser {
                     }
                 }
                 XmlPullParser.END_TAG -> depth--
-                XmlPullParser.END_DOCUMENT -> return displayName
+                XmlPullParser.END_DOCUMENT -> {
+                    if (diagnostic) throw org.xmlpull.v1.XmlPullParserException("Diagnostic channel is incomplete")
+                    return displayName
+                }
             }
         }
         return displayName
     }
 
-    private fun readProgramme(parser: XmlPullParser, feedId: Long): Programme? {
+    private fun readProgramme(parser: XmlPullParser, feedId: Long, onEvidence: ((Evidence) -> Unit)?): Programme? {
         val channelId = parser.getAttributeValue(null, "channel")
-        val start = parseXmltvTime(parser.getAttributeValue(null, "start"))
-        val stop = parseXmltvTime(parser.getAttributeValue(null, "stop"))
+        val rawStart = parser.getAttributeValue(null, "start")
+        val start = parseXmltvTime(rawStart)
+        val rawStop = parser.getAttributeValue(null, "stop")
+        val stop = parseXmltvTime(rawStop)
 
         var title: String? = null
         var description: String? = null
@@ -165,15 +210,22 @@ object XmltvParser {
         }
 
         // A programme with no channel, no start, or a nonsensical span is not recoverable.
-        if (channelId.isNullOrBlank() || start == null) return null
-        val end = stop ?: (start + DEFAULT_DURATION_MILLIS)
-        if (end <= start) return null
+        val end = stop ?: start?.let { it + DEFAULT_DURATION_MILLIS }
+        val rejection = when {
+            channelId.isNullOrBlank() -> Rejection.BLANK_CHANNEL
+            start == null -> if (rawStart.isNullOrBlank()) Rejection.MISSING_START else Rejection.INVALID_START
+            end!! <= start -> Rejection.NONPOSITIVE_SPAN
+            else -> null
+        }
+        onEvidence?.invoke(Evidence(channelId, start, end, rejection, stop == null,
+            stop == null && !rawStop.isNullOrBlank()))
+        if (rejection != null) return null
 
         return Programme(
             feedId = feedId,
-            epgChannelId = channelId,
-            startUtcMillis = start,
-            endUtcMillis = end,
+            epgChannelId = channelId!!,
+            startUtcMillis = start!!,
+            endUtcMillis = end!!,
             title = title?.takeIf { it.isNotEmpty() } ?: UNTITLED,
             description = description?.takeIf { it.isNotEmpty() },
             category = category?.takeIf { it.isNotEmpty() },
