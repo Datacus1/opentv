@@ -22,6 +22,8 @@ import androidx.work.WorkerParameters
 import app.opentv.core.ServiceLocator
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+import android.os.SystemClock
 
 /**
  * Idle, bounded cache maintenance must be runnable even when Android says storage is low.
@@ -36,6 +38,10 @@ class GuideMaintenanceWorker(context: Context, params: WorkerParameters) :
             if (!graph.epgRepository.hasGuideSources()) return Result.success()
             val wasBlocked = graph.epgRepository.health.value.storageBlocked
             val ready = graph.epgRepository.maintainCache(System.currentTimeMillis())
+            if (graph.epgRepository.health.value.cleanupRemaining > 0 && graph.epgRepository.canMaintain()) {
+                GuideCatchUpWorker.enqueue(applicationContext)
+            }
+            if (graph.epgRepository.hasResolvedCapacity()) GuideRecoveryWorker.enqueueCapacityReady(applicationContext)
             // A constrained persistent retry observes the *application* reserve, which is higher
             // than Android's storage-not-low threshold. KEEP coalesces startup/maintenance retries.
             if (wasBlocked && ready) GuideRecoveryWorker.enqueueRestoredSpace(applicationContext)
@@ -78,6 +84,9 @@ class GuideRecoveryWorker(context: Context, params: WorkerParameters) :
             val graph = ServiceLocator.get(applicationContext)
             if (!graph.epgRepository.hasGuideSources()) return Result.success()
             val summary = graph.epgRepository.syncAll(System.currentTimeMillis(), force = false)
+            if (graph.epgRepository.health.value.cleanupRemaining > 0 && graph.epgRepository.canMaintain()) {
+                GuideCatchUpWorker.enqueue(applicationContext)
+            }
             if (needsRetry(summary.storageDeferred || summary.retryNeeded, summary.feedsFailed)) Result.retry()
             else Result.success()
         } catch (cancelled: CancellationException) {
@@ -93,6 +102,7 @@ class GuideRecoveryWorker(context: Context, params: WorkerParameters) :
         private const val TAG = "GuideRecovery"
         internal const val WORK_NAME = "opentv-guide-recovery"
         internal const val RESTORED_SPACE_WORK_NAME = "opentv-guide-restored"
+        internal const val CAPACITY_READY_WORK_NAME = "opentv-guide-capacity-ready"
         internal val COALESCING_POLICY = ExistingWorkPolicy.KEEP
 
         internal fun needsRetry(storageDeferred: Boolean, feedsFailed: Int): Boolean =
@@ -129,6 +139,42 @@ class GuideRecoveryWorker(context: Context, params: WorkerParameters) :
                 COALESCING_POLICY,
                 request(restoredSpace = true),
             )
+        }
+
+        fun enqueueCapacityReady(context: Context) {
+            WorkManager.getInstance(context).enqueueUniqueWork(CAPACITY_READY_WORK_NAME,
+                COALESCING_POLICY, request(restoredSpace = true))
+        }
+    }
+}
+
+/** Bounded continuation, not a larger transaction or a loop that competes with TV playback. */
+class GuideCatchUpWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+    override suspend fun doWork(): Result {
+        val repo = ServiceLocator.get(applicationContext).epgRepository
+        if (!repo.hasGuideSources()) return Result.success()
+        return try {
+            val again = runGuideCatchUp(allowed = { !isStopped && repo.canMaintain() },
+                pass = {
+                    repo.maintainCache(System.currentTimeMillis())
+                    if (repo.hasResolvedCapacity()) GuideRecoveryWorker.enqueueCapacityReady(applicationContext)
+                }, remaining = { repo.health.value.cleanupRemaining },
+                now = SystemClock::elapsedRealtime, pause = { delay(250) })
+            if (again) Result.retry() else Result.success()
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { Result.retry() }
+    }
+
+    companion object {
+        internal const val MAX_PASSES = 4
+        internal const val MAX_RUN_MILLIS = 15_000L
+        internal const val WORK_NAME = "opentv-guide-catch-up"
+        internal fun request() = OneTimeWorkRequestBuilder<GuideCatchUpWorker>()
+            .setInitialDelay(30, TimeUnit.SECONDS)
+            .setBackoffCriteria(BackoffPolicy.LINEAR, 30, TimeUnit.SECONDS)
+            .build()
+        fun enqueue(context: Context) {
+            WorkManager.getInstance(context).enqueueUniqueWork(WORK_NAME, ExistingWorkPolicy.KEEP, request())
         }
     }
 }

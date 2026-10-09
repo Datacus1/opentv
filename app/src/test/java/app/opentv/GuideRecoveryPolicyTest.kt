@@ -10,6 +10,7 @@ import androidx.work.NetworkType
 import androidx.work.ExistingWorkPolicy
 import app.opentv.data.work.GuideMaintenanceWorker
 import app.opentv.data.work.GuideRecoveryWorker
+import app.opentv.data.work.GuideCatchUpWorker
 import com.google.common.truth.Truth.assertThat
 import java.util.concurrent.TimeUnit
 import org.junit.Test
@@ -20,6 +21,15 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = android.app.Application::class)
 class GuideRecoveryPolicyTest {
+    @Test fun `catch up persists without network or low storage constraint and uses bounded linear retry`() {
+        val spec = GuideCatchUpWorker.request().workSpec
+        assertThat(spec.initialDelay).isEqualTo(30_000)
+        assertThat(spec.backoffPolicy).isEqualTo(BackoffPolicy.LINEAR)
+        assertThat(spec.backoffDelayDuration).isEqualTo(30_000)
+        assertThat(spec.constraints.requiredNetworkType).isEqualTo(NetworkType.NOT_REQUIRED)
+        assertThat(spec.constraints.requiresStorageNotLow()).isFalse()
+        assertThat(GuideCatchUpWorker.WORK_NAME).isNotEqualTo(GuideMaintenanceWorker.WORK_NAME)
+    }
     @Test fun `storage deferral retries even when no feed failed`() {
         assertThat(GuideRecoveryWorker.needsRetry(true, 0)).isTrue()
         assertThat(GuideRecoveryWorker.needsRetry(false, 1)).isTrue()

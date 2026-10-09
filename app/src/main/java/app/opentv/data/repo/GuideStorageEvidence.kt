@@ -31,6 +31,7 @@ import kotlinx.serialization.Serializable
     val lastSuccessMillis: Long, val lastAttemptMillis: Long, val failureCount: Int,
     val programmes: Long, val expired: Long, val eligibleExpired: Long,
     val current: Long, val beyondHorizon: Long, val lastEndMillis: Long?,
+    val capacityDeferred: Boolean = false,
 )
 
 @Serializable data class DirectoryStorageEvidence(val bytes: Long, val files: Int, val complete: Boolean)
@@ -68,7 +69,7 @@ object GuideStorageInspector {
                       COALESCE(SUM(CASE WHEN p.endUtcMillis <= ? THEN 1 ELSE 0 END), 0),
                       COALESCE(SUM(CASE WHEN p.endUtcMillis < ? THEN 1 ELSE 0 END), 0),
                       COALESCE(SUM(CASE WHEN p.startUtcMillis <= ? AND p.endUtcMillis > ? THEN 1 ELSE 0 END), 0),
-                      COALESCE(SUM(CASE WHEN p.startUtcMillis > ? THEN 1 ELSE 0 END), 0), MAX(p.endUtcMillis)
+                      COALESCE(SUM(CASE WHEN p.startUtcMillis > ? THEN 1 ELSE 0 END), 0), MAX(p.endUtcMillis), f.lastResult
                     FROM epg_feeds f LEFT JOIN programmes p ON p.feedId=f.id GROUP BY f.id ORDER BY f.id
                 """.trimIndent(), arrayOf(now, now - EpgRepository.RETENTION_PAST_MILLIS, now, now,
                     now + EpgRepository.RETENTION_FUTURE_MILLIS)).use { cursor ->
@@ -78,7 +79,8 @@ object GuideStorageInspector {
                             add(GuideFeedStorageEvidence(cursor.getLong(0), cursor.getInt(1) != 0,
                                 cursor.getInt(2) != 0, cursor.getLong(3), cursor.getLong(4), cursor.getInt(5),
                                 cursor.getLong(6), cursor.getLong(7), cursor.getLong(8), cursor.getLong(9),
-                                cursor.getLong(10), if (cursor.isNull(11)) null else cursor.getLong(11)))
+                                cursor.getLong(10), if (cursor.isNull(11)) null else cursor.getLong(11),
+                                GuideCapacityDeferral.isDeferred(cursor.getString(12))))
                         }
                     }
                 }

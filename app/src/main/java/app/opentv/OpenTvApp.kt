@@ -14,6 +14,7 @@ import app.opentv.data.repo.CatalogRepository
 import app.opentv.data.work.SyncWorker
 import app.opentv.data.work.GuideMaintenanceWorker
 import app.opentv.data.work.GuideRecoveryWorker
+import app.opentv.data.work.GuideCatchUpWorker
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.disk.DiskCache
@@ -64,6 +65,7 @@ class OpenTvApp : Application(), ImageLoaderFactory {
         val graph = ServiceLocator.get(this)
         SyncWorker.schedule(this)
         GuideMaintenanceWorker.schedule(this)
+        GuideCatchUpWorker.enqueue(this)
         GuideRecoveryWorker.enqueue(this)
 
         // When the normaliser has moved on since the catalogue was last processed, re-clean

@@ -1,4 +1,35 @@
-# Guide storage recovery (.39 / .40 / .41)
+# Guide storage recovery (.39 / .40 / .41 / .42)
+
+## .42 catch-up and condition-aware retries
+
+The periodic30-minute local worker remains the fallback. A KEEP-coalesced persistent
+catch-up worker starts after30seconds at startup or when maintenance/recovery finds
+eligible expired rows. It runs at most four existing bounded maintenance passes,
+yielding250ms between passes and checking a15-second budget between passes (not a
+hard interrupt of a SQLite transaction). It uses30-second linear retry while backlog
+remains. The existing1,000-row/8-batch healthy and100-row/4-batch low-reserve policies
+remain unchanged. Playback/recording/insufficient reserve stops catch-up; the normal
+periodic worker is the fallback when idle returns. No promise of instant Android
+background scheduling or uninterrupted expiry during long playback.
+
+Capacity deferral is persisted in existing lastResult metadata with the additional
+row capacity needed. It does not increase the transport failure count or erase
+genuine failure history. Repeated maintenance/refresh ticks don't contact the feed
+until both global and per-feed capacity fit. A dedicated coalesced immediate retry
+wakes after capacity becomes sufficient; ordinary genuine HTTP/parse errors retain
+their existing exponential feed backoff. A real error after the condition retry
+replaces the capacity marker and restores normal failure handling. The exact old
+capacity-failure text is recognized for one migration retry when basic room exists;
+it cannot know the old selected row demand until that first retry. Storage-reserve
+stops do not become persisted transport failures. No schema or reserves/caps change.
+
+October9 manual guide-only refresh on `.41` succeeded before `.42` deployment:
+all enabled feeds recorded full success, no rows older than one retained past day,
+and all6,581 variants were audited:4,106 current,5 upcoming,59 ambiguous,2,411
+unresolved, zero expired. ABC East/West, FOX East/West and ESPN current. Unresolved
+is not evidence that providers lack schedules. See root runbook for installation,
+artifact/test evidence and hardware scheduling limits; this section alone is not
+proof `.42` is installed or tested after reboot.
 
 This candidate is based on installed `.38` / source `4096400`, not the uninstalled
 `.37` voice build. It does not change players, Netflix mappings, boot scripts,

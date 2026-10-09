@@ -364,6 +364,10 @@ interface EpgFeedDao {
     )
     suspend fun markFailed(id: Long, millis: Long, result: String)
 
+    /** Capacity is not a transport failure; preserve real failure history until full success. */
+    @Query("UPDATE epg_feeds SET lastAttemptMillis = :millis, lastResult = :result WHERE id = :id")
+    suspend fun markDeferred(id: Long, millis: Long, result: String)
+
     @Query("UPDATE epg_feeds SET deleting = 1, enabled = 0 WHERE id = :id")
     suspend fun markDeleting(id: Long)
 
@@ -512,6 +516,9 @@ interface ProgrammeDao {
         """
     )
     suspend fun deleteExpiredBatch(beforeUtcMillis: Long, limit: Int): Int
+
+    @Query("SELECT COUNT(*) FROM programmes WHERE endUtcMillis < :beforeUtcMillis")
+    suspend fun countExpired(beforeUtcMillis: Long): Int
 
     /** Reject corrupt/far-future XMLTV dates outside the guide's visible horizon. */
     @Query(

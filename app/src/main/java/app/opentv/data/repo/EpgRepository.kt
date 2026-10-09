@@ -101,6 +101,8 @@ class EpgRepository(
         ) : FeedResult
 
         data class Failed(val reason: String) : FeedResult
+        data class CapacityDeferred(val requiredRows: Int) : FeedResult
+        data object StorageDeferred : FeedResult
     }
 
     private class StorageReserveException(message: String) : IllegalStateException(message)
@@ -116,6 +118,21 @@ class EpgRepository(
     ))
     val health: StateFlow<GuideHealth> = _health.asStateFlow()
     private var maintenanceBatchesRemaining = 0
+
+    suspend fun canMaintain(): Boolean = withContext(Dispatchers.IO) {
+        maintenanceAllowed() && GuideRecoveryMaintenancePolicy.mayStart(availableBytes(), true)
+    }
+
+    suspend fun hasResolvedCapacity(): Boolean = withContext(Dispatchers.IO) {
+        if (availableBytes() < SOFT_FREE_RESERVE_BYTES) return@withContext false
+        feedDao.enabled().any { feed -> GuideCapacityDeferral.fits(feed.lastResult,
+            programmeDao.countForFeed(feed.id), programmeDao.countAll(), rowLimitPerFeed, rowLimitTotal) }
+    }
+
+    private suspend fun updateMaintenanceProgress(now: Long) {
+        _health.value = _health.value.copy(cleanupRemaining = programmeDao.countExpired(now - RETENTION_PAST_MILLIS),
+            lastMaintenanceMillis = now)
+    }
 
     /** No database mutation; disposable caches may be reclaimed while playback is idle. */
     suspend fun prepareStorage(): Boolean = withContext(Dispatchers.IO) {
@@ -137,12 +154,14 @@ class EpgRepository(
         mutationMutex.withLock {
             if (!prepareStorage()) {
                 runRecoveryMaintenanceLocked(nowUtcMillis)
+                updateMaintenanceProgress(nowUtcMillis)
                 if (!updateStorageHealth()) return@withLock false
             }
             maintenanceBatchesRemaining = MAINTENANCE_MAX_BATCHES
             resumePendingDeletionsLocked()
             runBoundedRetentionLocked(nowUtcMillis)
             truncateWalWhenIdle()
+            updateMaintenanceProgress(nowUtcMillis)
             true
         }
     }
@@ -345,8 +364,16 @@ class EpgRepository(
                 var succeeded = 0
                 var failed = 0
                 var written = 0
+                var capacityDeferred = false
 
                 for (feed in feedDao.enabled()) {
+                    val deferred = GuideCapacityDeferral.isDeferred(feed.lastResult)
+                    val capacityReady = deferred && GuideCapacityDeferral.fits(feed.lastResult,
+                        programmeDao.countForFeed(feed.id), programmeDao.countAll(), rowLimitPerFeed, rowLimitTotal)
+                    if (deferred && !capacityReady && !force) {
+                        capacityDeferred = true
+                        continue
+                    }
                     val coverage = coverageFor(feed.id, nowUtcMillis)
                     if (
                         !shouldRefreshFeed(
@@ -356,7 +383,7 @@ class EpgRepository(
                             populatedChannels = coverage.populatedChannels,
                             coveredChannels = coverage.coveredChannels,
                             nowUtcMillis = nowUtcMillis,
-                            force = force,
+                            force = force || capacityReady,
                         )
                     ) {
                         succeeded++
@@ -401,6 +428,14 @@ class EpgRepository(
                             feedDao.markFailed(feed.id, nowUtcMillis, result.reason)
                             Log.w(TAG, "Guide feed ${feed.id} failed: ${result.reason}")
                         }
+                        is FeedResult.CapacityDeferred -> {
+                            capacityDeferred = true
+                            feedDao.markDeferred(feed.id, nowUtcMillis, GuideCapacityDeferral.encode(result.requiredRows))
+                        }
+                        FeedResult.StorageDeferred -> {
+                            _health.value = _health.value.copy(storageBlocked = true, freeBytes = availableBytes())
+                            return@withLock cachedSummary(succeeded, failed, written, nowUtcMillis, true)
+                        }
                     }
                 }
 
@@ -419,10 +454,14 @@ class EpgRepository(
                 val (matched, total) = runMatcherLocked()
                 truncateWalWhenIdle()
                 logStorageState()
+                updateMaintenanceProgress(nowUtcMillis)
                 _health.value = _health.value.copy(
-                    failed = failed > 0 || shortGuide.retryNeeded || feedDao.enabled().any { it.failureCount > 0 },
+                    capacityBlocked = capacityDeferred,
+                    failed = failed > 0 || shortGuide.retryNeeded || feedDao.enabled().any {
+                        it.failureCount > 0 && !GuideCapacityDeferral.isDeferred(it.lastResult) },
                     freeBytes = availableBytes())
-                SyncSummary(succeeded, failed, written, matched, total, retryNeeded = _health.value.failed)
+                SyncSummary(succeeded, failed, written, matched, total,
+                    retryNeeded = _health.value.failed || capacityDeferred)
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (error: Exception) {
@@ -600,8 +639,10 @@ class EpgRepository(
             // Count identity changes before any writes. A cap must not become an eventual target
             // when idle maintenance is paused: updating existing rows is fine, growing past either
             // cap is deferred. Working cache stays intact until idle cleanup creates reusable room.
-            if (!hasRowCapacity(feed.id, selected)) {
-                return FeedResult.Failed("Guide cache needs idle maintenance before adding new listings; cached listings retained.")
+            val required = newRowsRequired(feed.id, selected)
+            if (programmeDao.countForFeed(feed.id).toLong() + required > rowLimitPerFeed ||
+                programmeDao.countAll().toLong() + required > rowLimitTotal) {
+                return FeedResult.CapacityDeferred(required)
             }
             val seen = HashSet<GuideProgrammeSelector.Key>()
             openFeedStream(feed).use { stream ->
@@ -674,7 +715,7 @@ class EpgRepository(
         } catch (e: CancellationException) {
             throw e
         } catch (e: StorageReserveException) {
-            FeedResult.Failed(e.message ?: "Refresh stopped to protect free storage.")
+            FeedResult.StorageDeferred
         } catch (e: Exception) {
             // No cleanup here: the last complete cache is still present. A later complete refresh
             // reconciles any partial newer rows through lastSeenSyncMillis.
@@ -692,7 +733,7 @@ class EpgRepository(
             lastSeenSyncMillis = syncMillis,
         )
 
-    private suspend fun hasRowCapacity(feedId: Long, selected: Set<GuideProgrammeSelector.Key>): Boolean {
+    private suspend fun newRowsRequired(feedId: Long, selected: Set<GuideProgrammeSelector.Key>): Int {
         var existing = 0
         for (keys in selected.toList().chunked(250)) {
             val clauses = keys.joinToString(" OR ") { "(feedId = ? AND epgChannelId = ? AND startUtcMillis = ?)" }
@@ -703,7 +744,11 @@ class EpgRepository(
                 "SELECT epgChannelId, startUtcMillis FROM programmes WHERE $clauses",
                 args.toTypedArray())).size
         }
-        val newRows = selected.size - existing
+        return selected.size - existing
+    }
+
+    private suspend fun hasRowCapacity(feedId: Long, selected: Set<GuideProgrammeSelector.Key>): Boolean {
+        val newRows = newRowsRequired(feedId, selected)
         return programmeDao.countForFeed(feedId).toLong() + newRows <= rowLimitPerFeed &&
             programmeDao.countAll().toLong() + newRows <= rowLimitTotal
     }

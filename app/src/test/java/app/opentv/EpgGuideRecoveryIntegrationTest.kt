@@ -204,7 +204,10 @@ class EpgGuideRecoveryIntegrationTest {
         db.programmes().upsertAll(listOf(p("other", now), p("extra", now)))
         response = { xml(listOf(p("known", now + 60_000))) }
         val r = repo(allowed = { false }, perFeed = 3, total = 3)
-        assertEquals(1, r.syncAll(now, true).feedsFailed); assertEquals(3, db.programmes().countAll())
+        val deferred = r.syncAll(now, true)
+        assertEquals(0, deferred.feedsFailed); assertTrue(deferred.retryNeeded)
+        assertEquals(0, db.epgFeeds().all().first { it.id == 1L }.failureCount)
+        assertEquals(3, db.programmes().countAll())
         assertEquals(1, requests)
         response = { xml(listOf(p("known", now))) }
         assertEquals(0, r.syncAll(now, true).feedsFailed); assertEquals(3, db.programmes().countAll())
@@ -214,7 +217,8 @@ class EpgGuideRecoveryIntegrationTest {
         db.epgFeeds().insert(EpgFeed(id = 2, name = "Disabled", enabled = false))
         db.programmes().upsertAll(listOf(p("other", now).copy(feedId = 2), p("extra", now).copy(feedId = 2)))
         response = { xml(listOf(p("known", now + 60_000))) }
-        assertEquals(1, repo(allowed = { false }, perFeed = 10, total = 3).syncAll(now, true).feedsFailed)
+        val deferred = repo(allowed = { false }, perFeed = 10, total = 3).syncAll(now, true)
+        assertEquals(0, deferred.feedsFailed); assertTrue(deferred.retryNeeded)
         assertEquals(3, db.programmes().countAll()); assertEquals(1, requests)
     }
     @Test fun `audit checks every channel variant across multiple pages without writing database`() = runBlocking {
@@ -226,6 +230,40 @@ class EpgGuideRecoveryIntegrationTest {
         val pages = (0 until 405 step 200).flatMap { app.opentv.data.repo.GuideCoverageAudit.page(rows, it, 200).rows }
         assertEquals(405, pages.map { it.channelId }.toSet().size)
         assertEquals(before, db.epgFeeds().all()); assertEquals(0, requests)
+    }
+    @Test fun `capacity deferral survives repository restart and retries once actual room appears`() = runBlocking {
+        db.programmes().upsertAll(listOf(p("expired", now - 3 * 86_400_000L)))
+        response = { xml(listOf(p("new", now))) }
+        assertTrue(repo(allowed = { false }, perFeed = 2, total = 2).syncAll(now, true).retryNeeded)
+        assertEquals(1, requests); assertEquals(0, db.epgFeeds().all().first { it.id == 1L }.failureCount)
+        val r = repo(allowed = { false }, perFeed = 2, total = 2)
+        assertTrue(r.syncAll(now + 1000).retryNeeded); assertEquals(1, requests)
+        repo(perFeed = 2, total = 2).maintainCache(now + 1000)
+        assertTrue(r.hasResolvedCapacity())
+        assertEquals(0, r.syncAll(now + 1000).feedsFailed); assertEquals(3, requests)
+        assertFalse(r.hasResolvedCapacity())
+        r.syncAll(now + 2000); assertEquals(3, requests)
+    }
+    @Test fun `legacy capacity failure bypasses obsolete backoff but genuine network failure does not`() = runBlocking {
+        val feed = db.epgFeeds().all().single()
+        db.epgFeeds().update(feed.copy(lastAttemptMillis = now, failureCount = 7,
+            lastResult = app.opentv.data.repo.GuideCapacityDeferral.LEGACY))
+        assertEquals(0, repo().syncAll(now + 1000).feedsFailed); assertEquals(2, requests)
+        db.epgFeeds().update(feed.copy(lastAttemptMillis = now, failureCount = 7,
+            lastResult = "Download failed (IOException); cached listings retained."))
+        repo().maintainCache(now + 1000)
+        assertFalse(repo().hasResolvedCapacity())
+        repo().syncAll(now + 1000); assertEquals(2, requests)
+        assertEquals(7, db.epgFeeds().all().first { it.id == 1L }.failureCount)
+    }
+    @Test fun `capacity resolved followed by real HTTP failure reinstates ordinary backoff`() = runBlocking {
+        db.epgFeeds().update(db.epgFeeds().all().single().copy(lastAttemptMillis = now,
+            lastResult = app.opentv.data.repo.GuideCapacityDeferral.encode(1)))
+        response = { throw java.io.IOException("Synthetic private transport detail") }
+        assertEquals(1, repo().syncAll(now + 1000).feedsFailed)
+        assertEquals(1, requests); assertFalse(repo().hasResolvedCapacity())
+        repo().maintainCache(now + 2000); repo().syncAll(now + 2000)
+        assertEquals(1, requests)
     }
     @Test fun `identity preflight handles more than 250 keys at full global capacity`() = runBlocking {
         val rows = listOf(p("known", now)) + (0 until 250).flatMap { id ->
