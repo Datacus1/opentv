@@ -1,5 +1,26 @@
 # Cached-first guide
 
+## Verified release
+
+`.53-cached-first-guide` (versionCode72), application source07a5acf, was installed
+in place on October10 with the original UID/data retained. Both full test variants
+passed:662 tests passed/four opt-in skips, plus release lint/R8/shrinking/package
+and signature checks. The saved6,581-channel fixture retained all6,445 safe groups,
+focus keys and guide choices. Visual live samples passed in All/Entertainment/
+Sports/Locals, including preview and settled full-screen/Back navigation; the user
+accepted testing and asked to stop. No further device commands were sent.
+
+APK SHA256: `931F34982127F445DEE8BAEEA79EA4D64F38299DF93FDF345EB4379612949CDB`.
+Saved workspace recovery APK:
+`downloads/OpenTV/opentv-v0.11.7-commercial-break.53-cached-first-guide.apk`.
+Initial app-bootstrap splash remains; this change replaces the guide-row loader,
+not every startup screen. Audible audio, physical remote, reboot, zero-frame
+handoff and exhaustive live broadcast accuracy were not established by these
+tests. No post-stop storage/identity audit was run. Earlier .51/.52 artifacts remain
+available locally for recovery. Voice testing remains paused.
+
+## Design
+
 The guide prepares selectable rows from the saved channel catalogue before waiting
 for the shared Room programme window. A compact, non-focusable notice replaces the
 former whole-guide loader. This is not an HTTP sync and does not add disk storage.
