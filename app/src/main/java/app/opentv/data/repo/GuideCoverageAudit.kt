@@ -18,10 +18,19 @@ fun chooseGuideCandidate(
     variants: List<Channel>,
     byEpgChannel: Map<String, List<Programme>>,
     nowUtcMillis: Long,
+): String? = chooseGuideCandidate(variants, byEpgChannel, nowUtcMillis, null)
+
+/** Same identity checks, with optional build-local keys for the guide's hot path. */
+internal fun chooseGuideCandidate(
+    variants: List<Channel>,
+    byEpgChannel: Map<String, List<Programme>>,
+    nowUtcMillis: Long,
+    preparedKeys: ChannelGrouping.PreparedKeys?,
 ): String? {
     // Fail closed if a caller supplies mixed identities; all genuine duplicates still participate.
     val primary = variants.maxByOrNull { it.qualityRank } ?: return null
-    val ordered = ChannelGrouping.variantsFor(primary, variants).sortedByDescending { it.qualityRank }
+    val ordered = (preparedKeys?.variantsFor(primary, variants)
+        ?: ChannelGrouping.variantsFor(primary, variants)).sortedByDescending { it.qualityRank }
     ordered.asSequence().mapNotNull { it.epgOverrideId?.takeIf(String::isNotBlank) }
         .firstOrNull { !byEpgChannel[it].isNullOrEmpty() }?.let { return it }
     val candidates = ordered.flatMap { it.epgCandidates }.filter(String::isNotBlank).distinct()

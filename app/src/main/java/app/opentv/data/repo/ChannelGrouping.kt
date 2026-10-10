@@ -7,6 +7,7 @@ package app.opentv.data.repo
 
 import app.opentv.data.model.Channel
 import app.opentv.data.parser.ChannelNameNormalizer
+import java.util.IdentityHashMap
 
 /** Runtime-only identity boundary. A normalized name alone is not proof of shared programming. */
 object ChannelGrouping {
@@ -40,6 +41,45 @@ object ChannelGrouping {
         token(listOf(channel.sourceId.toString()) + identity(channel, rawIdentity))
 
     fun groups(channels: List<Channel>): Map<String, List<Channel>> = channels.groupBy(::key)
+
+    /**
+     * Immutable keys for one guide build, bounded by its input objects. No global cache, id-only
+     * lookup or insertion on a miss: a copied/updated channel must use its own current identity.
+     */
+    class PreparedKeys(channels: List<Channel>) {
+        private val keys = IdentityHashMap<Channel, PreparedKey>().apply {
+            for (channel in channels) if (!containsKey(channel)) put(channel, PreparedKey.create(channel))
+        }
+
+        internal val size: Int get() = keys.size
+
+        fun key(channel: Channel): String = keys[channel]?.keyFor(channel) ?: ChannelGrouping.key(channel)
+
+        fun groups(channels: List<Channel>): Map<String, List<Channel>> = channels.groupBy(::key)
+
+        fun variantsFor(channel: Channel, candidates: List<Channel>): List<Channel> {
+            val target = key(channel)
+            return candidates.filter { key(it) == target }
+        }
+
+        fun preparedKey(channel: Channel): PreparedKey = keys[channel] ?: PreparedKey.create(channel)
+    }
+
+    /** A row retains only its own key, never the whole build's index. Safe across Row.copy(). */
+    class PreparedKey private constructor(private val channel: Channel, private val value: String) {
+        fun keyFor(candidate: Channel): String =
+            if (candidate === channel) value else ChannelGrouping.key(candidate)
+
+        // Keep data-row equality stable across builds with structurally identical channel data.
+        override fun equals(other: Any?): Boolean =
+            other is PreparedKey && channel == other.channel && value == other.value
+
+        override fun hashCode(): Int = 31 * channel.hashCode() + value.hashCode()
+
+        companion object {
+            internal fun create(channel: Channel): PreparedKey = PreparedKey(channel, ChannelGrouping.key(channel))
+        }
+    }
 
     fun variantsFor(channel: Channel, candidates: List<Channel>): List<Channel> {
         val target = key(channel)

@@ -337,8 +337,9 @@ class ChannelsViewModel(app: Application) : AndroidViewModel(app) {
         val programmes: List<Programme>,
         /** Includes same-quality/category duplicates for return focus and user-field updates. */
         val allVariants: List<Channel> = variants,
+        private val preparedKey: ChannelGrouping.PreparedKey? = null,
     ) {
-        val key: String = ChannelGrouping.key(primary)
+        val key: String = preparedKey?.keyFor(primary) ?: ChannelGrouping.key(primary)
     }
 
     /**
@@ -473,7 +474,8 @@ class ChannelsViewModel(app: Application) : AndroidViewModel(app) {
         // in ready-made, rather than regrouping the whole EPG on every category tap. Grouping is
         // kept out of SQL because the programme query cannot take a channel-id list without
         // hitting SQLite's bound-variable cap, and quality-variant folding is pure list work.
-        val groups = ChannelGrouping.groups(channels)
+        val preparedKeys = ChannelGrouping.PreparedKeys(channels)
+        val groups = preparedKeys.groups(channels)
 
         val total = groups.size.coerceAtLeast(1)
         var built = 0
@@ -486,7 +488,7 @@ class ChannelsViewModel(app: Application) : AndroidViewModel(app) {
 
             // Only identity-verified variants may share a listing. Raw provider IDs and
             // another region's populated schedule cannot bypass the matcher here.
-            val list = app.opentv.data.repo.chooseGuideCandidate(group, byEpgChannel, now)
+            val list = app.opentv.data.repo.chooseGuideCandidate(group, byEpgChannel, now, preparedKeys)
                 ?.let { id -> byEpgChannel[id] }
                 ?.sortedBy { it.startUtcMillis }
                 .orEmpty()
@@ -507,6 +509,7 @@ class ChannelsViewModel(app: Application) : AndroidViewModel(app) {
                 next = list.firstOrNull { it.startUtcMillis > now },
                 programmes = list,
                 allVariants = group,
+                preparedKey = preparedKeys.preparedKey(primary),
             )
         }
     }
