@@ -133,7 +133,8 @@ fun HomeScreen(
     val channelLayout by settings.channelLayout.collectAsState()
 
     val categories by viewModel.visibleCategoryGroups.collectAsState()
-    val rows by viewModel.rows.collectAsState()
+    val guideState by viewModel.guideState.collectAsState()
+    val rows = guideState.rows
     val selectedCategory by viewModel.selectedCategory.collectAsState()
     val favouritesOnly by viewModel.favouritesOnly.collectAsState()
     val sources by viewModel.sources.collectAsState()
@@ -265,6 +266,9 @@ fun HomeScreen(
         favouritesOnly,
     ) {
         if (rows.isEmpty()) return@LaunchedEffect
+        channelMenu?.let { open ->
+            channelMenu = rows.firstOrNull { it.key == open.key }
+        }
         if (pendingGuideReturnSelection) {
             val currentIndex = GuidePreviewPolicy.returningRowIndex(
                 currentChannelId = currentChannelId,
@@ -573,15 +577,30 @@ fun HomeScreen(
 
         // ---- Preview + guide ---------------------------------------------------------------
         Column(Modifier.weight(1f)) {
+            // A small, display-only notice never replaces the guide or steals remote focus.
+            if (!guideState.catalogueReady || guideState.listingsLoading || guideState.failed) {
+                GuideBackgroundStatus(
+                    catalogueReady = guideState.catalogueReady,
+                    failed = guideState.failed,
+                )
+            }
+            GuidePreview(
+                row = highlightedRow.takeIf { rows.isNotEmpty() },
+                nowMillis = nowMillis,
+                previewPlayer = if (previewVisible && screenResumed) previewController.player else null,
+                guideHealth = guideHealth,
+                listingsLoading = guideState.listingsLoading,
+            )
             if (rows.isEmpty()) {
                 when {
-                    favouritesOnly -> NoFavouritesState()
-                    // Work genuinely in progress: a sync is running, the catalogue check hasn't
-                    // returned yet, or channels ARE on disk and the guide is still building. A
-                    // large provider takes a while, and showing "No channels" during it reads as
-                    // failure — which is how someone concludes an app is broken thirty seconds
-                    // after installing it.
-                    isSyncing || channelsPresent == null || channelsPresent == true -> LoadingState(isSyncing)
+                    !guideState.catalogueReady && !guideState.failed -> Spacer(Modifier.weight(1f))
+                    favouritesOnly && guideState.catalogueReady -> NoFavouritesState()
+                    isSyncing || channelsPresent == null -> Spacer(Modifier.weight(1f))
+                    channelsPresent == true && !guideState.failed -> Text(
+                        stringResource(R.string.guide_empty_view),
+                        modifier = Modifier.padding(16.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     // Nothing is syncing and the catalogue is confirmed empty. With a provider
                     // configured, the last load failed or returned nothing — surface a clear error
                     // with Retry and a way back to setup instead of spinning forever.
@@ -589,12 +608,6 @@ fun HomeScreen(
                     else -> EmptyState(onAddSource)
                 }
             } else {
-                GuidePreview(
-                    row = highlightedRow,
-                    nowMillis = nowMillis,
-                    previewPlayer = if (previewVisible && screenResumed) previewController.player else null,
-                    guideHealth = guideHealth,
-                )
                 guideHealth.notice()?.let { notice ->
                     // Display-only; preserve the guide header's remote focus boundary.
                     Text(
@@ -623,6 +636,7 @@ fun HomeScreen(
                 if (channelLayout == AppSettings.ChannelLayout.LIST) {
                     ChannelList(
                         rows = rows,
+                        listingsLoading = guideState.listingsLoading,
                         selectedKey = highlightedRow?.key,
                         focusRequestKey = guideFocusTargetKey,
                         focusRequestId = guideFocusRequestId,
@@ -642,6 +656,7 @@ fun HomeScreen(
                 } else {
                     GuideGrid(
                         rows = rows,
+                        listingsLoading = guideState.listingsLoading,
                         guideHealth = guideHealth,
                         windowStartMillis = windowStart,
                         dayOffset = guideDayOffset,
@@ -1268,48 +1283,25 @@ private fun ChannelRow(
 }
 
 @Composable
-private fun LoadingState(isSyncing: Boolean) {
-    val s by app.opentv.core.StatusBus.message.collectAsState()
-    val p by app.opentv.core.StatusBus.progress.collectAsState()
-    val status = s
-    val progress = p
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.widthIn(max = 460.dp),
-        ) {
-            if (progress == null) {
-                CircularProgressIndicator()
-            } else {
-                Text(
-                    "${(progress * 100).toInt()}%",
-                    style = MaterialTheme.typography.headlineMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
-            Spacer(Modifier.height(20.dp))
-            Text(stringResource(R.string.guide_loading_channels), style = MaterialTheme.typography.headlineSmall)
-            Spacer(Modifier.height(8.dp))
-            Text(
-                when {
-                    // Actively assembling — this is work in progress, not a failure.
-                    status != null -> status
-                    isSyncing -> stringResource(R.string.guide_fetching_desc)
-                    // Channels are already on the device; the guide is being built from them.
-                    // A big provider takes a moment (longer on this debug build) — not a failure.
-                    else -> stringResource(R.string.guide_building_desc)
-                },
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-            )
-            if (progress != null) {
-                Spacer(Modifier.height(20.dp))
-                LinearProgressIndicator(
-                    progress = { progress },
-                    modifier = Modifier.fillMaxWidth().height(6.dp),
-                )
-            }
+private fun GuideBackgroundStatus(catalogueReady: Boolean, failed: Boolean) {
+    Row(
+        Modifier.fillMaxWidth().height(30.dp).padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (!failed) {
+            CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 2.dp)
+            Spacer(Modifier.width(8.dp))
         }
+        Text(
+            stringResource(when {
+                failed -> R.string.guide_background_unavailable
+                !catalogueReady -> R.string.guide_reading_saved_channels
+                else -> R.string.guide_loading_cached_listings
+            }),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+        )
     }
 }
 

@@ -46,9 +46,12 @@ object ChannelGrouping {
      * Immutable keys for one guide build, bounded by its input objects. No global cache, id-only
      * lookup or insertion on a miss: a copied/updated channel must use its own current identity.
      */
-    class PreparedKeys(channels: List<Channel>) {
+    class PreparedKeys(channels: List<Channel>, checkCancellation: () -> Unit = {}) {
         private val keys = IdentityHashMap<Channel, PreparedKey>().apply {
-            for (channel in channels) if (!containsKey(channel)) put(channel, PreparedKey.create(channel))
+            for ((index, channel) in channels.withIndex()) {
+                if (index % 64 == 0) checkCancellation()
+                if (!containsKey(channel)) put(channel, PreparedKey.create(channel))
+            }
         }
 
         internal val size: Int get() = keys.size

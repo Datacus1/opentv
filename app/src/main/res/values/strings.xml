@@ -63,6 +63,10 @@
     <string name="guide_no_info">No guide information</string>
     <string name="guide_next_prefix">Next  %1$s  %2$s</string>
     <string name="guide_loading_channels">Loading your channels</string>
+    <string name="guide_reading_saved_channels">Opening saved channels…</string>
+    <string name="guide_loading_cached_listings">Loading cached listings…</string>
+    <string name="guide_background_unavailable">Guide unavailable — saved channels remain usable.</string>
+    <string name="guide_empty_view">No channels in this view.</string>
     <string name="guide_fetching_desc">Fetching the channel list and guide from your provider. A large provider can take a couple of minutes the first time.</string>
     <string name="guide_building_desc">Building your guide from the channels saved on this device. On a big provider this takes a moment — it\'ll appear shortly.</string>
     <string name="guide_no_favourites_title">No favourites yet</string>

@@ -72,6 +72,7 @@ fun GuidePreview(
     nowMillis: Long,
     previewPlayer: ExoPlayer?,
     guideHealth: GuideHealth = GuideHealth(),
+    listingsLoading: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     Row(
@@ -188,7 +189,8 @@ fun GuidePreview(
                 }
             } else {
                 Text(
-                    guideHealth.emptyListingMessage(stringResource(R.string.guide_no_info_channel)),
+                    if (listingsLoading) stringResource(R.string.guide_loading_cached_listings)
+                    else guideHealth.emptyListingMessage(stringResource(R.string.guide_no_info_channel)),
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

@@ -105,6 +105,7 @@ fun GuideGrid(
     onExitLeftFromChannel: () -> Boolean = { false },
     dayOffset: Int = 0,
     guideHealth: GuideHealth = GuideHealth(),
+    listingsLoading: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val scroll = rememberScrollState()
@@ -154,6 +155,7 @@ fun GuideGrid(
                     onToggleFavourite = { onToggleFavourite(row) },
                     onExitLeft = onExitLeftFromChannel,
                     guideHealth = guideHealth,
+                    listingsLoading = listingsLoading,
                 )
             }
         }
@@ -170,6 +172,7 @@ fun GuideGrid(
 @Composable
 fun ChannelList(
     rows: List<ChannelsViewModel.Row>,
+    listingsLoading: Boolean = false,
     selectedKey: Any?,
     focusRequestKey: Any? = null,
     focusRequestId: Int = 0,
@@ -201,6 +204,7 @@ fun ChannelList(
         itemsIndexed(rows, key = { _, row -> row.key }) { index, row ->
             ChannelListRow(
                 row = row,
+                listingsLoading = listingsLoading,
                 isFirstRow = index == 0,
                 isLastRow = index == rows.lastIndex,
                 nowMillis = now,
@@ -223,6 +227,7 @@ fun ChannelList(
 @Composable
 private fun ChannelListRow(
     row: ChannelsViewModel.Row,
+    listingsLoading: Boolean = false,
     isFirstRow: Boolean,
     isLastRow: Boolean,
     nowMillis: Long,
@@ -310,7 +315,7 @@ private fun ChannelListRow(
             val nowProg = row.now
             Text(
                 text = nowProg?.let { "${clockFormat.format(Date(it.startUtcMillis))}  ${it.title}" }
-                    ?: stringResource(R.string.guide_no_info),
+                    ?: stringResource(if (listingsLoading) R.string.guide_loading_cached_listings else R.string.guide_no_info),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -402,6 +407,7 @@ private fun GuideRow(
     onToggleFavourite: () -> Unit = {},
     onExitLeft: () -> Boolean = { false },
     guideHealth: GuideHealth = GuideHealth(),
+    listingsLoading: Boolean = false,
 ) {
     // Focus (the d-pad border) just moves the highlight. Selection (the filled cell) is the
     // channel the preview is playing — it only changes when you press OK.
@@ -526,7 +532,8 @@ private fun GuideRow(
                     contentAlignment = Alignment.CenterStart,
                 ) {
                     Text(
-                        guideHealth.emptyListingMessage(stringResource(R.string.guide_no_info)),
+                        if (listingsLoading) stringResource(R.string.guide_loading_cached_listings)
+                        else guideHealth.emptyListingMessage(stringResource(R.string.guide_no_info)),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
